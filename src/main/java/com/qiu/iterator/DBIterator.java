@@ -1,9 +1,7 @@
 package com.qiu.iterator;
 
 import com.qiu.memory.MemTable;
-import com.qiu.sstable.SSTable;
 import com.qiu.version.Version;
-import com.qiu.version.VersionSet;
 
 import java.io.IOException;
 import java.util.*;

@@ -3,9 +3,6 @@ package com.qiu.version;
 import java.util.Arrays;
 import java.util.Objects;
 
-import java.util.Arrays;
-import java.util.Objects;
-
 /**
  * SSTable文件元数据
  */

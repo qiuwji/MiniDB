@@ -1,7 +1,5 @@
 package com.qiu.compaction;
 
-import com.qiu.compaction.CompactionStats;
-import com.qiu.compaction.MergingIterator;
 import com.qiu.sstable.SSTable;
 import com.qiu.sstable.TableBuilder;
 import com.qiu.version.FileMetaData;

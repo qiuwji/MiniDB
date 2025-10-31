@@ -4,7 +4,10 @@ package com.qiu.compaction;
 import com.qiu.util.BytewiseComparator;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.PriorityQueue;
 
 /**
  * 合并多个表迭代器，按键顺序返回数据（去重，保留第一次出现的版本）

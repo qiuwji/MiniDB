@@ -4,7 +4,6 @@ import com.qiu.core.WriteBatch;
 import com.qiu.util.BytewiseComparator;
 
 import java.util.*;
-import java.util.Objects;
 
 /**
  * 内存表，包装跳表并提供墓碑标记支持

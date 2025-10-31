@@ -1,6 +1,8 @@
 package com.qiu.version;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * 版本编辑记录，描述版本之间的变更
