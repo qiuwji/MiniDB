@@ -68,8 +68,8 @@ public class WAL implements AutoCloseable {
 
         ByteBuffer buffer = ByteBuffer.allocate(size);
 
-        // 写入序列号
-        buffer.putLong(0); // 由DB在恢复时重新分配
+        // [MODIFIED] 写入真实的序列号
+        buffer.putLong(batch.getSequenceNumber());
 
         // 写入每个操作
         for (WriteBatch.WriteOp op : batch.getOperations()) {
@@ -154,8 +154,10 @@ public class WAL implements AutoCloseable {
             ByteBuffer buffer = ByteBuffer.wrap(data);
             WriteBatch batch = new WriteBatch();
 
-            // 读取序列号（在恢复时会被忽略，由DB重新分配）
+            // [MODIFIED] 读取序列号
             long sequence = buffer.getLong();
+            // [NEW] 将恢复的序列号存入 WriteBatch
+            batch.setSequenceNumber(sequence);
 
             // 读取每个操作
             while (buffer.hasRemaining()) {
@@ -256,6 +258,4 @@ public class WAL implements AutoCloseable {
     public String getFilePath() {
         return filePath;
     }
-
-
 }

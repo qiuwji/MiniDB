@@ -87,7 +87,7 @@ public class MiniDB implements DB {
 
         Status status = write(batch);
         totalPuts.incrementAndGet();
-            return status;
+        return status;
     }
 
     @Override
@@ -158,6 +158,9 @@ public class MiniDB implements DB {
         long startSeq = sequenceNumber.getAndAdd(batch.size());
 
         try {
+            // [NEW] 将起始序列号保存到 WriteBatch 中，以便 WAL 序列化
+            batch.setSequenceNumber(startSeq);
+
             // 先应用到 memTable（确保内存状态一致）
             applyBatchToMemTable(memTable, batch, startSeq);
 
@@ -268,6 +271,7 @@ public class MiniDB implements DB {
 
     /**
      * 恢复数据库状态
+     * [MODIFIED] 重构以使用 WAL 中恢复的原始序列号
      */
     private void recoverExistingWALs() throws IOException {
         java.nio.file.Path dir = java.nio.file.Path.of(dbPath);
@@ -287,7 +291,8 @@ public class MiniDB implements DB {
                     })
                     .toList();
 
-            long seq = sequenceNumber.get();
+            // [MODIFIED] 跟踪恢复的最大序列号
+            long maxRecoveredSeq = -1;
             int recoveredBatches = 0;
             int recoveredRecords = 0;
 
@@ -298,14 +303,30 @@ public class MiniDB implements DB {
                     var batches = oldWal.recover();
                     for (var batch : batches) {
                         if (batch != null && !batch.isEmpty()) {
-                            // 使用按-op 递增的序号应用到 memTable
-                            applyBatchToMemTable(memTable, batch, seq);
-                            seq += batch.size();
+
+                            // [MODIFIED] 从 batch 中获取原始序列号
+                            long originalSeq = batch.getSequenceNumber();
+
+                            if (originalSeq == -1) {
+                                // 序列号无效 (可能是旧格式的WAL或已损坏)
+                                System.err.println("Warning: Recovered batch with invalid sequence number (-1) from " + path + ". Skipping batch.");
+                                continue;
+                            }
+
+                            // [MODIFIED] 使用原始序列号应用到 memTable
+                            applyBatchToMemTable(memTable, batch, originalSeq);
+
+                            // [MODIFIED] 更新 maxRecoveredSeq
+                            long lastSeqInBatch = originalSeq + batch.size() - 1;
+                            if (lastSeqInBatch > maxRecoveredSeq) {
+                                maxRecoveredSeq = lastSeqInBatch;
+                            }
+
                             recoveredBatches++;
                             recoveredRecords += batch.size();
 
-                            System.out.printf("Recovered batch with %d operations, next seq: %d%n",
-                                    batch.size(), seq);
+                            System.out.printf("Recovered batch with %d operations, original seq: %d%n",
+                                    batch.size(), originalSeq);
                         }
                     }
                 } catch (Exception e) {
@@ -313,9 +334,15 @@ public class MiniDB implements DB {
                     // 不中断，继续尝试恢复其余日志
                 }
             }
-            sequenceNumber.set(seq);
+
+            // [MODIFIED] 将全局序列号计数器设置为恢复的最大值 + 1
+            if (maxRecoveredSeq != -1) {
+                sequenceNumber.set(maxRecoveredSeq + 1);
+            }
+
             System.out.println("Recovered " + recoveredBatches + " write batches (" +
                     recoveredRecords + " records) from WAL files.");
+            System.out.println("Next sequence number set to: " + sequenceNumber.get());
 
             // 如果恢复后内存表过大，立即切换
             if (memTable.approximateSize() > options.getMemtableSize()) {

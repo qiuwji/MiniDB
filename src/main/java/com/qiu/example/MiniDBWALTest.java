@@ -30,8 +30,10 @@ public class MiniDBWALTest {
                 .createIfMissing(true)
                 .build();
 
+        long before = System.currentTimeMillis();
+
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
-            for (int i = 0; i < 3030; i++) {
+            for (int i = 3000; i < 3030; i++) {
                 String key = "key_" + i;
                 String value = "value_" + i;
                 db.put(key.getBytes(), value.getBytes());
@@ -41,6 +43,9 @@ public class MiniDBWALTest {
         } catch (Exception e) {
             e.printStackTrace();
         }
+
+        long after = System.currentTimeMillis();
+        System.out.println("时间流逝：" + (after - before));
     }
 
     /** 第二次运行：重启数据库并验证是否能恢复数据 */
