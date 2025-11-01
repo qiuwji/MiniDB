@@ -31,18 +31,24 @@ public class WAL implements AutoCloseable {
         Objects.requireNonNull(batch, "Write batch cannot be null");
 
         if (batch.isEmpty()) {
-            return; // 空批次不需要写入
+            return;
         }
 
         // 序列化WriteBatch
         byte[] serialized = serializeWriteBatch(batch);
+
+        // 检查序列化后的大小
+        if (serialized.length > LogConstants.MAX_RECORD_SIZE) {
+            throw new IOException("Serialized WriteBatch too large: " + serialized.length +
+                    " bytes (max: " + LogConstants.MAX_RECORD_SIZE + ")");
+        }
 
         // 写入日志
         writer.addRecord(serialized);
     }
 
     /**
-     * 序列化WriteBatch
+     * 序列化WriteBatch - 修复边界检查
      */
     private byte[] serializeWriteBatch(WriteBatch batch) {
         // 计算所需缓冲区大小
@@ -55,10 +61,15 @@ public class WAL implements AutoCloseable {
             }
         }
 
+        // 检查大小限制
+        if (size > LogConstants.MAX_RECORD_SIZE) {
+            throw new IllegalStateException("WriteBatch too large: " + size + " bytes");
+        }
+
         ByteBuffer buffer = ByteBuffer.allocate(size);
 
-        // 写入序列号（暂时为0，由DB分配）
-        buffer.putLong(0);
+        // 写入序列号
+        buffer.putLong(0); // 由DB在恢复时重新分配
 
         // 写入每个操作
         for (WriteBatch.WriteOp op : batch.getOperations()) {
@@ -66,13 +77,21 @@ public class WAL implements AutoCloseable {
             buffer.put((byte) (op.isDelete ? 0 : 1));
 
             // 写入键
-            buffer.putInt(op.key.length);
-            buffer.put(op.key);
+            if (op.key.length > 0) {
+                buffer.putInt(op.key.length);
+                buffer.put(op.key);
+            } else {
+                throw new IllegalArgumentException("Key cannot be empty");
+            }
 
             // 如果是插入操作，写入值
             if (!op.isDelete) {
-                buffer.putInt(op.value.length);
-                buffer.put(op.value);
+                if (op.value != null && op.value.length > 0) {
+                    buffer.putInt(op.value.length);
+                    buffer.put(op.value);
+                } else {
+                    throw new IllegalArgumentException("Value cannot be null or empty for put operation");
+                }
             }
         }
 
@@ -87,12 +106,16 @@ public class WAL implements AutoCloseable {
 
         List<WriteBatch> batches = new ArrayList<>();
 
-        // 检查文件是否存在
         if (!Env.fileExists(filePath)) {
-            return batches; // 文件不存在，返回空列表
+            return batches;
         }
 
-        try (LogReader reader = new LogReader(filePath, false)) {
+        int successful = 0;
+        int failed = 0;
+
+        try (LogReader reader = new LogReader(filePath, true)) { // 启用CRC校验
+            reader.reset(); // 确保状态重置
+
             while (reader.hasNext()) {
                 try {
                     byte[] record = reader.next();
@@ -100,28 +123,30 @@ public class WAL implements AutoCloseable {
                         WriteBatch batch = deserializeWriteBatch(record);
                         if (batch != null && !batch.isEmpty()) {
                             batches.add(batch);
+                            successful++;
                         }
                     }
-                } catch (java.util.NoSuchElementException ne) {
-                    System.err.println("Failed to recover WAL record: " + ne.getMessage());
-                    // 发生在 reader.next() 抛出 NoSuchElement 时，继续尝试下一个
-                    continue;
                 } catch (Exception e) {
+                    failed++;
                     System.err.println("Failed to recover WAL record: " + e.getMessage());
-                    // 继续恢复下一条，不中断
+                    // 继续恢复，不中断
                 }
             }
+        } catch (Exception e) {
+            System.err.println("WAL recovery error: " + e.getMessage());
+            // 返回已成功恢复的批次
         }
 
-        System.out.println("Recovered " + batches.size() + " write batches from WAL");
+        System.out.println("WAL recovery: " + successful + " successful, " + failed + " failed");
         return batches;
     }
 
     /**
-     * 反序列化WriteBatch（增强错误处理）
+     * 反序列化WriteBatch - 增强错误处理
      */
     private WriteBatch deserializeWriteBatch(byte[] data) {
         if (data == null || data.length < 8) {
+            System.err.println("Invalid WAL record: too short or null");
             return null;
         }
 
@@ -129,21 +154,22 @@ public class WAL implements AutoCloseable {
             ByteBuffer buffer = ByteBuffer.wrap(data);
             WriteBatch batch = new WriteBatch();
 
-            // 读取序列号（暂时忽略）
+            // 读取序列号（在恢复时会被忽略，由DB重新分配）
             long sequence = buffer.getLong();
 
             // 读取每个操作
             while (buffer.hasRemaining()) {
+                // 检查操作类型
+                if (buffer.remaining() < 1) break;
                 byte opType = buffer.get();
                 boolean isDelete = (opType == 0);
 
-                // 安全检查：确保有足够的数据读取键长度
-                if (buffer.remaining() < 4) break;
-
                 // 读取键
+                if (buffer.remaining() < 4) break;
                 int keyLength = buffer.getInt();
                 if (keyLength < 0 || keyLength > buffer.remaining()) {
-                    break; // 无效的键长度
+                    System.err.println("Invalid key length: " + keyLength);
+                    break;
                 }
 
                 byte[] key = new byte[keyLength];
@@ -152,12 +178,12 @@ public class WAL implements AutoCloseable {
                 if (isDelete) {
                     batch.delete(key);
                 } else {
-                    // 安全检查：确保有足够的数据读取值长度
+                    // 读取值
                     if (buffer.remaining() < 4) break;
-
                     int valueLength = buffer.getInt();
                     if (valueLength < 0 || valueLength > buffer.remaining()) {
-                        break; // 无效的值长度
+                        System.err.println("Invalid value length: " + valueLength);
+                        break;
                     }
 
                     byte[] value = new byte[valueLength];
@@ -207,22 +233,6 @@ public class WAL implements AutoCloseable {
         }
     }
 
-    /**
-     * 重命名WAL文件（用于日志滚动）
-     */
-    public void rename(String newPath) throws IOException {
-        checkNotClosed();
-        close(); // 先关闭当前writer
-
-        if (Env.fileExists(filePath)) {
-            Env.renameFile(filePath, newPath);
-        }
-
-        // 创建新的writer
-        this.writer = new LogWriter(newPath);
-        this.closed = false;
-    }
-
     @Override
     public void close() throws IOException {
         if (!closed) {
@@ -246,4 +256,6 @@ public class WAL implements AutoCloseable {
     public String getFilePath() {
         return filePath;
     }
+
+
 }

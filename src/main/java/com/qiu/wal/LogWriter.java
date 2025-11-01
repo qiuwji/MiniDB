@@ -15,13 +15,9 @@ import java.util.Objects;
 public class LogWriter implements AutoCloseable {
     private final FileChannel fileChannel;
     private final String filePath;
-    private long blockOffset; // 当前块内的偏移量
+    private int blockOffset; // 当前块内的偏移量
     private int blockRemaining; // 当前块剩余空间
     private boolean closed;
-
-    // 当前分片状态（用于跨块记录）
-    private boolean inFragmentedRecord;
-    private LogType currentFragmentType;
 
     public LogWriter(String filePath) throws IOException {
         this.filePath = Objects.requireNonNull(filePath, "File path cannot be null");
@@ -33,10 +29,11 @@ public class LogWriter implements AutoCloseable {
                 StandardOpenOption.WRITE,
                 StandardOpenOption.APPEND);
 
-        this.blockOffset = fileChannel.position() % LogConstants.BLOCK_SIZE;
-        this.blockRemaining = LogConstants.BLOCK_SIZE - (int) blockOffset;
+        // 初始化块状态
+        long fileSize = fileChannel.size();
+        this.blockOffset = (int) (fileSize % LogConstants.BLOCK_SIZE);
+        this.blockRemaining = LogConstants.BLOCK_SIZE - blockOffset;
         this.closed = false;
-        this.inFragmentedRecord = false;
     }
 
     /**
@@ -46,19 +43,29 @@ public class LogWriter implements AutoCloseable {
         checkNotClosed();
         Objects.requireNonNull(data, "Data cannot be null");
 
-        if (data.length > LogConstants.MAX_RECORD_SIZE) {
-            throw new IllegalArgumentException("Record too large: " + data.length);
-        }
+
+// 允许大记录分片
+//        if (data.length > LogConstants.MAX_RECORD_SIZE) {
+//            throw new IllegalArgumentException("Record too large: " + data.length);
+//        }
 
         int dataOffset = 0;
         int dataRemaining = data.length;
         boolean isFirstFragment = true;
 
-        // 分片写入记录（如果需要跨块）
+        // 分片写入记录
         while (dataRemaining > 0) {
-            final int fragmentSpace = Math.min(dataRemaining, blockRemaining - LogConstants.HEADER_SIZE);
-            final boolean isLastFragment = (fragmentSpace == dataRemaining);
+            // 检查是否需要开始新块
+            if (blockRemaining < LogConstants.HEADER_SIZE) {
+                writePadding();
+            }
 
+            // 计算当前分片大小
+            int availableSpace = blockRemaining - LogConstants.HEADER_SIZE;
+            int fragmentLength = Math.min(dataRemaining, availableSpace);
+            boolean isLastFragment = (dataRemaining == fragmentLength);
+
+            // 确定记录类型
             LogType type;
             if (isFirstFragment && isLastFragment) {
                 type = LogType.FULL_TYPE;
@@ -70,31 +77,33 @@ public class LogWriter implements AutoCloseable {
                 type = LogType.MIDDLE_TYPE;
             }
 
-            writePhysicalRecord(type, data, dataOffset, fragmentSpace);
+            // 写入分片
+            writeFragment(type, data, dataOffset, fragmentLength);
 
-            dataOffset += fragmentSpace;
-            dataRemaining -= fragmentSpace;
+            // 更新状态
+            dataOffset += fragmentLength;
+            dataRemaining -= fragmentLength;
             isFirstFragment = false;
         }
     }
 
     /**
-     * 写入物理记录（一个分片）
+     * 写入填充字节
      */
-    private void writePhysicalRecord(LogType type, byte[] data, int offset, int length)
-            throws IOException {
-
-        // 检查是否需要新块（如果剩余空间不足以放 header）
-        if (blockRemaining < LogConstants.HEADER_SIZE) {
-            if (blockRemaining > 0) {
-                byte[] padding = new byte[blockRemaining];
-                fileChannel.write(ByteBuffer.wrap(padding));
-            }
-            blockOffset = 0;
-            blockRemaining = LogConstants.BLOCK_SIZE;
+    private void writePadding() throws IOException {
+        if (blockRemaining > 0) {
+            byte[] padding = new byte[blockRemaining];
+            fileChannel.write(ByteBuffer.wrap(padding));
         }
+        blockOffset = 0;
+        blockRemaining = LogConstants.BLOCK_SIZE;
+    }
 
-        // 计算 CRC（包含 type + data fragment）
+    /**
+     * 写入记录分片
+     */
+    private void writeFragment(LogType type, byte[] data, int offset, int length) throws IOException {
+        // 计算CRC（包括类型和数据）
         byte[] crcData = new byte[1 + length];
         crcData[0] = type.getValue();
         if (length > 0) {
@@ -102,57 +111,26 @@ public class LogWriter implements AutoCloseable {
         }
         int crc = CRC32.value(crcData);
 
-        // 构建并写入记录头：crc(4) | length(2) | type(1)
+        // 准备头部
         ByteBuffer header = ByteBuffer.allocate(LogConstants.HEADER_SIZE);
-        header.putInt(crc);                 // 4 bytes
-        header.putShort((short) length);    // 2 bytes
-        header.put(type.getValue());        // 1 byte
-        header.flip();                      // <- 非常重要：准备从头写出
+        header.putInt(crc);
+        header.putShort((short) length);
+        header.put(type.getValue());
+        header.flip();
 
         // 写入头部
-        while (header.hasRemaining()) {
-            fileChannel.write(header);
-        }
+        fileChannel.write(header);
 
-        // 写入数据片段（如果有）
+        // 写入数据
         if (length > 0) {
-            ByteBuffer dataBuf = ByteBuffer.wrap(data, offset, length);
-            while (dataBuf.hasRemaining()) {
-                fileChannel.write(dataBuf);
-            }
+            ByteBuffer dataBuffer = ByteBuffer.wrap(data, offset, length);
+            fileChannel.write(dataBuffer);
         }
-
-        // 可按需控制 flush（不必每条都强制）
-        fileChannel.force(false);
 
         // 更新块状态
         int recordSize = LogConstants.HEADER_SIZE + length;
         blockOffset += recordSize;
         blockRemaining -= recordSize;
-
-        // 更新分片状态
-        if (type == LogType.FULL_TYPE || type == LogType.LAST_TYPE) {
-            inFragmentedRecord = false;
-        } else {
-            inFragmentedRecord = true;
-            currentFragmentType = type;
-        }
-    }
-
-    /**
-     * 获取当前文件位置
-     */
-    public long getFilePosition() throws IOException {
-        checkNotClosed();
-        return fileChannel.position();
-    }
-
-    /**
-     * 获取文件大小
-     */
-    public long getFileSize() throws IOException {
-        checkNotClosed();
-        return fileChannel.size();
     }
 
     /**
@@ -164,23 +142,37 @@ public class LogWriter implements AutoCloseable {
     }
 
     /**
-     * 同步刷盘（更强制的方式）
+     * 同步刷盘
      */
     public void sync() throws IOException {
         checkNotClosed();
         fileChannel.force(true);
     }
 
+    /**
+     * 获取文件大小
+     */
+    public long getFileSize() throws IOException {
+        checkNotClosed();
+        return fileChannel.size();
+    }
+
+    /**
+     * 获取当前文件位置
+     */
+    public long getFilePosition() throws IOException {
+        checkNotClosed();
+        return fileChannel.position();
+    }
+
     @Override
     public void close() throws IOException {
         if (!closed) {
             try {
-                // 确保所有数据刷盘
                 flush();
-
-                // 如果正在分片记录中，写入一个结束标记
-                if (inFragmentedRecord) {
-                    writePhysicalRecord(LogType.LAST_TYPE, new byte[0], 0, 0);
+                // 确保块对齐
+                if (blockRemaining < LogConstants.BLOCK_SIZE) {
+                    writePadding();
                 }
             } finally {
                 fileChannel.close();

@@ -14,7 +14,7 @@ public class MiniDBWALTest {
 
     public static void main(String[] args) {
         // 控制当前运行模式：true=写入阶段，false=恢复验证阶段
-        boolean writePhase = false; // ⚠️ 第一次运行设为 true，第二次改为 false
+        boolean writePhase = 1 == 0; // ⚠️ 第一次运行设为 true，第二次改为 false
 
         if (writePhase) {
             runWritePhase();
@@ -31,7 +31,7 @@ public class MiniDBWALTest {
                 .build();
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
-            for (int i = 0; i < 10; i++) {
+            for (int i = 0; i < 3030; i++) {
                 String key = "key_" + i;
                 String value = "value_" + i;
                 db.put(key.getBytes(), value.getBytes());
@@ -51,7 +51,7 @@ public class MiniDBWALTest {
                 .build();
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
-            for (int i = 0; i < 10; i++) {
+            for (int i = 0; i < 3030; i++) {
                 String key = "key_" + i;
                 byte[] valueBytes = db.get(key.getBytes());
                 if (valueBytes != null) {

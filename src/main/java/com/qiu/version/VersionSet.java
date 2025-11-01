@@ -1,4 +1,3 @@
-// src/main/java/com/qiu/version/VersionSet.java
 package com.qiu.version;
 
 import java.io.IOException;
@@ -201,17 +200,30 @@ public class VersionSet implements AutoCloseable {
 
     /**
      * 清理过时版本
+     *
+     * 说明：原来使用迭代器并调用 remove() 会导致 CopyOnWriteArrayList 的迭代器抛 UnsupportedOperationException。
+     * 这里使用 removeIf 并在 predicate 中先做文件清理，以保证在多线程环境下安全移除。
      */
     private void cleanupObsoleteVersions() {
-        Iterator<Version> it = obsoleteVersions.iterator();
-        while (it.hasNext()) {
-            Version version = it.next();
+        obsoleteVersions.removeIf(version -> {
             if (version.getRefCount() == 0) {
-                // 可以安全删除该版本相关的文件
-                cleanupVersionFiles(version);
-                it.remove();
+                try {
+                    cleanupVersionFiles(version);
+                } catch (Exception e) {
+                    // 捕获并记录异常，但仍返回 true 以便从集合中移除该版本，避免重复尝试造成阻塞
+                    String id;
+                    try {
+                        id = String.valueOf(version.getVersionId());
+                    } catch (Throwable t) {
+                        id = version.toString();
+                    }
+                    System.err.println("Failed cleaning version " + id + ": " + e.getMessage());
+                    e.printStackTrace();
+                }
+                return true;
             }
-        }
+            return false;
+        });
     }
 
     /**
@@ -220,7 +232,11 @@ public class VersionSet implements AutoCloseable {
     private void cleanupVersionFiles(Version version) {
         // 在实际实现中，这里会删除不再被任何版本引用的SSTable文件
         // 简化实现：只从内存中移除
-        System.out.println("Cleaning up version: " + version.getVersionId());
+        try {
+            System.out.println("Cleaning up version: " + version.getVersionId());
+        } catch (Throwable t) {
+            System.out.println("Cleaning up version: " + version.toString());
+        }
     }
 
     /**
@@ -232,15 +248,28 @@ public class VersionSet implements AutoCloseable {
             manifest.close();
         }
 
-        // 清理所有活跃版本
+        // 清理所有活跃版本：只在 refCount > 0 时调用 unref，避免重复释放
         for (Version version : activeVersions) {
-            while (version.unref()) {
-                // 减少引用计数直到为0
+            try {
+                while (version.getRefCount() > 0) {
+                    // 在某些实现中 unref() 可能抛 IllegalStateException，如果发生则跳出循环
+                    try {
+                        version.unref();
+                    } catch (IllegalStateException e) {
+                        // 已经为 0 或被重复释放，记录并跳出
+                        System.err.println("Warning: version.unref() threw when closing: " + e.getMessage());
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                // 记录但继续处理其它版本
+                System.err.println("Error while unref-ing version during close: " + e.getMessage());
+                e.printStackTrace();
             }
         }
         activeVersions.clear();
 
-        // 清理过时版本
+        // 清理过时版本（不再需要）
         obsoleteVersions.clear();
     }
 

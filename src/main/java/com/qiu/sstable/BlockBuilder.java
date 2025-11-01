@@ -47,7 +47,7 @@ public class BlockBuilder {
             throw new IllegalArgumentException("Keys must be in ascending order");
         }
 
-        int entrySize = key.length + value.length + 8; // 2 * 4字节长度前缀
+        int entrySize = key.length + value.length + 12; // 3 * 4字节长度前缀（shared, nonShared, valueLen）
         if (currentSize + entrySize > blockSize && !isEmpty()) {
             throw new IllegalStateException("Block size exceeded");
         }
@@ -69,13 +69,15 @@ public class BlockBuilder {
         // 计算所需缓冲区大小
         int keyValueSize = 0;
         for (int i = 0; i < keys.size(); i++) {
-            keyValueSize += 4 + keys.get(i).length + 4 + values.get(i).length;
+            // 每条记录写入： shared(int=4) + nonShared(int=4) + valueLen(int=4) + nonSharedBytes + valueBytes
+            // 使用 key.length 作为 nonShared 的上界（安全估计）
+            keyValueSize += 12 + keys.get(i).length + values.get(i).length;
         }
 
-        // 重启点数组（每16个条目一个重启点）
+        // 重启点数组大小： numRestarts * 4 (每个重启点的偏移) + 4 (重启点数量)
         int restartInterval = 16;
         int numRestarts = (keys.size() + restartInterval - 1) / restartInterval;
-        int restartsSize = (numRestarts + 1) * 4; // 重启点偏移量 + 重启点数量
+        int restartsSize = numRestarts * 4 + 4;
 
         int totalSize = keyValueSize + restartsSize;
         ByteBuffer buffer = ByteBuffer.allocate(totalSize);
@@ -95,21 +97,25 @@ public class BlockBuilder {
 
             int nonShared = key.length - shared;
 
-            // 写入共享长度、非共享长度、值长度
+            // 写入共享长度、非共享长度、值长度（3 个 int）
             buffer.putInt(shared);
             buffer.putInt(nonShared);
             buffer.putInt(value.length);
 
             // 写入非共享键部分和值
-            buffer.put(key, shared, nonShared);
-            buffer.put(value);
+            if (nonShared > 0) {
+                buffer.put(key, shared, nonShared);
+            }
+            if (value.length > 0) {
+                buffer.put(value);
+            }
 
             prevKey = key;
         }
 
-        // 写入重启点
+        // 写入重启点（这里我们将重启点写为条目索引位置）
         for (int i = 0; i < keys.size(); i += restartInterval) {
-            buffer.putInt(i); // 重启点存储的是条目索引
+            buffer.putInt(i);
         }
 
         // 写入重启点数量

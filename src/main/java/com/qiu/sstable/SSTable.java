@@ -209,7 +209,7 @@ public class SSTable implements AutoCloseable {
     /**
      * SSTable内部迭代器实现
      */
-    public class TableIterator {
+    public static class TableIterator {
         private final SSTable table;
         private Block.BlockIterator currentBlockIter;
         private Block.BlockIterator indexIter;
