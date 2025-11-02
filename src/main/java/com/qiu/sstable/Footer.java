@@ -4,7 +4,7 @@ package com.qiu.sstable;
  * SSTable文件尾部，包含元数据索引和数据的索引
  */
 public class Footer {
-    public static final int ENCODED_LENGTH = 48; // 2 * BlockHandle最大编码长度 + 魔数
+    public static final int ENCODED_LENGTH = 40; // 2 * BlockHandle最大编码长度 + 魔数
     public static final long MAGIC_NUMBER = 0xdb4775248b80fb57L; // 随机魔数
 
     private final BlockHandle metaIndexHandle;

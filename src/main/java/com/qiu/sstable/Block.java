@@ -13,6 +13,7 @@ public class Block {
     private final byte[] data;
     private final int numRestarts;
     private final Comparator<byte[]> comparator;
+    private final int restartsOffset;
 
     public Block(byte[] data) {
         this(data, new BytewiseComparator());
@@ -33,13 +34,19 @@ public class Block {
         if (numRestarts < 0 || numRestarts * 4 > data.length - 4) {
             throw new IllegalArgumentException("Invalid restart points");
         }
+
+        // 计算重启点区域的起始位置
+        this.restartsOffset = data.length - 4 - numRestarts * 4;
+        if (restartsOffset < 0) {
+            throw new IllegalArgumentException("Invalid block structure");
+        }
     }
 
     /**
      * 创建Block迭代器
      */
     public BlockIterator iterator() {
-        return new BlockIterator(data, numRestarts, comparator);
+        return new BlockIterator(data, numRestarts, restartsOffset, comparator);
     }
 
     /**
@@ -60,18 +67,23 @@ public class Block {
     public static class BlockIterator {
         private final byte[] data;
         private final int numRestarts;
+        private final int restartsOffset;
         private final Comparator<byte[]> comparator;
+        private final int[] restartPositions;
+
         private int currentEntry;
         private byte[] currentKey;
         private byte[] currentValue;
         private boolean valid;
 
-        private BlockIterator(byte[] data, int numRestarts, Comparator<byte[]> comparator) {
+        private BlockIterator(byte[] data, int numRestarts, int restartsOffset, Comparator<byte[]> comparator) {
             this.data = data;
             this.numRestarts = numRestarts;
+            this.restartsOffset = restartsOffset;
             this.comparator = comparator;
             this.currentEntry = -1;
             this.valid = false;
+            this.restartPositions = loadRestartPositions();
         }
 
         public boolean isValid() {
@@ -79,9 +91,13 @@ public class Block {
         }
 
         public void seekToFirst() {
+            if (getEntryCount() == 0) {
+                valid = false;
+                return;
+            }
             currentEntry = 0;
             parseEntry(0);
-            valid = (currentEntry < getEntryCount());
+            valid = currentEntry < getEntryCount();
         }
 
         public void seek(byte[] target) {
@@ -90,33 +106,65 @@ public class Block {
                 return;
             }
 
-            // 二分查找
-            int left = 0;
-            int right = getEntryCount() - 1;
+            // 使用重启点进行二分查找优化
+            int leftRestart = 0;
+            int rightRestart = numRestarts - 1;
 
-            while (left <= right) {
-                int mid = left + (right - left) / 2;
-                parseEntry(mid);
+            // 在重启点间二分查找
+            while (leftRestart <= rightRestart) {
+                int midRestart = leftRestart + (rightRestart - leftRestart) / 2;
+                int entryIndex = getRestartEntryIndex(midRestart);
+                parseEntry(entryIndex);
+
+                // 确保 parseEntry 成功
+                if (!isValid()) {
+                    // 如果解析失败（例如，entryIndex无效），则停止二分查找
+                    break;
+                }
 
                 int cmp = comparator.compare(currentKey, target);
                 if (cmp < 0) {
-                    left = mid + 1;
+                    leftRestart = midRestart + 1;
                 } else if (cmp > 0) {
-                    right = mid - 1;
+                    rightRestart = midRestart - 1;
                 } else {
+                    // === 修复点 1：更新 currentEntry ===
+                    // 找到了完全匹配
+                    currentEntry = entryIndex;
                     valid = true;
                     return;
                 }
             }
 
-            // 没找到精确匹配，定位到第一个 >= target 的条目
-            currentEntry = left;
-            if (currentEntry < getEntryCount()) {
-                parseEntry(currentEntry);
-                valid = true;
-            } else {
-                valid = false;
+            // 在找到的重启点段内线性搜索
+            // leftRestart 现在是第一个 >= target 的重启点索引
+
+            // segmentStart 是上一个重启点的条目索引
+            int segmentStart = (leftRestart > 0) ? getRestartEntryIndex(leftRestart - 1) : 0;
+
+            // 我们应该从 segmentStart 扫描到块的末尾（由 getEntryCount() 估算）。
+            int segmentEnd = getEntryCount();
+
+            for (int i = segmentStart; i < segmentEnd; i++) {
+                parseEntry(i);
+
+                // parseEntry 可能会因为索引超出实际范围而设置 valid = false
+                if (!isValid()) {
+                    break;
+                }
+
+                int cmp = comparator.compare(currentKey, target);
+                if (cmp >= 0) {
+                    // 找到第一个 >= target 的键
+                    currentEntry = i;
+                    valid = true;
+                    return;
+                }
             }
+
+            // 没找到，定位到文件末尾
+            currentEntry = getEntryCount();
+            valid = false;
         }
 
         public void next() {
@@ -136,60 +184,141 @@ public class Block {
             if (!valid) {
                 throw new IllegalStateException("Iterator is not valid");
             }
-            return currentKey.clone(); // 防御性拷贝
+            return currentKey.clone();
         }
 
         public byte[] value() {
             if (!valid) {
                 throw new IllegalStateException("Iterator is not valid");
             }
-            return currentValue.clone(); // 防御性拷贝
+            return currentValue.clone();
         }
 
+        /**
+         * 估算条目数量 - 基于实际数据大小进行估算
+         */
         private int getEntryCount() {
-            // 估算条目数量（不精确，但足够用于迭代）
-            return numRestarts * 16; // 假设每16个条目一个重启点
+            if (restartsOffset == 0) return 0;
+
+            // 简单估算：假设平均每个条目占用20字节
+            int estimatedEntries = restartsOffset / 20;
+            return Math.max(estimatedEntries, numRestarts);
         }
 
+        /**
+         * 获取重启点对应的条目索引
+         */
+        private int getRestartEntryIndex(int restartIndex) {
+            if (restartIndex < 0 || restartIndex >= numRestarts) {
+                throw new IllegalArgumentException("Invalid restart index: " + restartIndex);
+            }
+            return restartPositions[restartIndex];
+        }
+
+        /**
+         * 加载重启点位置数组
+         */
+        private int[] loadRestartPositions() {
+            int[] positions = new int[numRestarts];
+            ByteBuffer buffer = ByteBuffer.wrap(data);
+            buffer.position(restartsOffset);
+
+            for (int i = 0; i < numRestarts; i++) {
+                positions[i] = buffer.getInt();
+            }
+            return positions;
+        }
+
+        /**
+         * 解析指定索引的条目
+         */
         private void parseEntry(int entryIndex) {
-            // 简化实现：实际需要解析重启点和前缀压缩
-            // 这里使用简化逻辑，实际实现需要处理前缀压缩
             try {
                 ByteBuffer buffer = ByteBuffer.wrap(data);
+                buffer.position(0);
 
-                // 跳过重启点区域
-                int dataEnd = data.length - 4 - numRestarts * 4;
+                byte[] prevKey = new byte[0];
+                int currentPos = 0;
+                int currentIndex = 0;
 
-                // 简单模拟：假设每个条目都是独立存储的
-                // 实际实现需要处理前缀压缩格式
-                int pos = entryIndex * 32; // 简化：假设每个条目约32字节
-                if (pos >= dataEnd) {
-                    valid = false;
-                    return;
+                while (currentPos < restartsOffset && currentIndex <= entryIndex) {
+                    buffer.position(currentPos);
+
+                    // 读取前缀压缩格式
+                    int shared = buffer.getInt();
+                    int nonShared = buffer.getInt();
+                    int valueLen = buffer.getInt();
+
+                    // 检查边界
+                    if (shared < 0 || nonShared < 0 || valueLen < 0 ||
+                            currentPos + 12 + nonShared + valueLen > restartsOffset) {
+                        valid = false;
+                        return;
+                    }
+
+                    // 读取非共享键部分和值
+                    byte[] nonSharedKey = new byte[nonShared];
+                    byte[] value = new byte[valueLen];
+
+                    if (nonShared > 0) {
+                        buffer.get(nonSharedKey);
+                    }
+                    if (valueLen > 0) {
+                        buffer.get(value);
+                    }
+
+                    // 重建完整键
+                    byte[] key = new byte[shared + nonShared];
+                    if (shared > 0) {
+                        System.arraycopy(prevKey, 0, key, 0, Math.min(shared, prevKey.length));
+                    }
+                    if (nonShared > 0) {
+                        System.arraycopy(nonSharedKey, 0, key, shared, nonShared);
+                    }
+
+                    // 更新位置
+                    currentPos = buffer.position();
+
+                    // 如果是目标条目
+                    if (currentIndex == entryIndex) {
+                        currentKey = key;
+                        currentValue = value;
+                        currentEntry = entryIndex;
+                        valid = true;
+                        return;
+                    }
+
+                    prevKey = key;
+                    currentIndex++;
                 }
 
-                buffer.position(pos);
-
-                // 读取键长度和值长度（简化）
-                int keyLen = Math.min(buffer.getInt(), dataEnd - pos - 8);
-                int valueLen = buffer.getInt();
-
-                if (keyLen < 0 || valueLen < 0 || pos + 8 + keyLen + valueLen > dataEnd) {
-                    valid = false;
-                    return;
-                }
-
-                currentKey = new byte[keyLen];
-                currentValue = new byte[valueLen];
-
-                buffer.get(currentKey);
-                buffer.get(currentValue);
-                currentEntry = entryIndex;
-                valid = true;
+                // 条目索引超出范围
+                valid = false;
 
             } catch (Exception e) {
                 valid = false;
             }
         }
+
+        /**
+         * 获取当前条目索引（用于调试）
+         */
+        public int getCurrentEntry() {
+            return currentEntry;
+        }
+    }
+
+    /**
+     * 获取重启点数量（用于测试）
+     */
+    public int getNumRestarts() {
+        return numRestarts;
+    }
+
+    /**
+     * 获取数据区域大小（用于测试）
+     */
+    public int getDataSize() {
+        return restartsOffset;
     }
 }
