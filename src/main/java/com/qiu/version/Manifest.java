@@ -95,13 +95,12 @@ public class Manifest implements AutoCloseable {
      */
     public void recover() throws IOException {
         checkNotClosed();
-
-        fileChannel.position(0); // 移动到文件开头
+        fileChannel.position(0);
 
         VersionEdit edit;
         while ((edit = readEdit()) != null) {
-            // 应用版本编辑到当前版本集，但不要再次写回 manifest（避免重复）
-            versionSet.logAndApply(edit);
+            // 使用专门的方法，避免写回Manifest
+            versionSet.applyEditForRecovery(edit);
         }
     }
 

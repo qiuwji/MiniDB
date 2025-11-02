@@ -47,8 +47,6 @@ public class SSTable implements AutoCloseable {
         checkNotClosed();
         Objects.requireNonNull(key, "Key cannot be null");
 
-        // 使用布隆过滤器快速排除（注意：这里仍然是全局过滤，实际应该在数据块级别）
-        // 但由于当前设计是全局布隆过滤器，暂时保持这样
         if (!filter.mayContain(key)) {
             return Optional.empty();
         }
@@ -67,7 +65,7 @@ public class SSTable implements AutoCloseable {
     }
 
     /**
-     * 查找包含指定键的数据块句柄（修正版）
+     * 查找包含指定键的数据块句柄
      */
     private BlockHandle findDataBlockHandle(byte[] key) throws IOException {
         Block.BlockIterator indexIter = indexBlock.iterator();

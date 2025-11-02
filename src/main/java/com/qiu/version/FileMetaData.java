@@ -2,16 +2,22 @@ package com.qiu.version;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * SSTable文件元数据
+ * (修复了线程安全问题)
  */
 public class FileMetaData {
+
     private final long fileNumber;
     private final long fileSize;
     private final byte[] smallestKey;
     private final byte[] largestKey;
-    private int allowedSeeks; // 用于压缩触发（可变）
+
+    // === 修复 P6: 'allowedSeeks' 是可变状态，必须是原子的 ===
+    // 它可能被多个线程（如 compaction 检查）并发访问
+    private final AtomicInteger allowedSeeks;
 
     public FileMetaData(long fileNumber, long fileSize, byte[] smallestKey, byte[] largestKey) {
         this(fileNumber, fileSize, smallestKey, largestKey, 100); // 默认100次查找后触发压缩
@@ -34,7 +40,8 @@ public class FileMetaData {
         if (allowedSeeks < 0) {
             throw new IllegalArgumentException("Allowed seeks cannot be negative");
         }
-        this.allowedSeeks = allowedSeeks;
+        // === 修复 P6: 初始化 AtomicInteger ===
+        this.allowedSeeks = new AtomicInteger(allowedSeeks);
     }
 
     public long getFileNumber() {
@@ -53,15 +60,21 @@ public class FileMetaData {
         return largestKey.clone(); // 防御性拷贝
     }
 
+    /**
+     * === 修复 P6: 线程安全 getter ===
+     */
     public int getAllowedSeeks() {
-        return allowedSeeks;
+        return allowedSeeks.get();
     }
 
+    /**
+     * === 修复 P6: 线程安全 setter ===
+     */
     public void setAllowedSeeks(int allowedSeeks) {
         if (allowedSeeks < 0) {
             throw new IllegalArgumentException("Allowed seeks cannot be negative");
         }
-        this.allowedSeeks = allowedSeeks;
+        this.allowedSeeks.set(allowedSeeks);
     }
 
     /**
@@ -91,7 +104,8 @@ public class FileMetaData {
         FileMetaData that = (FileMetaData) obj;
         return fileNumber == that.fileNumber &&
                 fileSize == that.fileSize &&
-                allowedSeeks == that.allowedSeeks &&
+                // === 修复 P6: 比较原子变量的值 ===
+                allowedSeeks.get() == that.allowedSeeks.get() &&
                 Arrays.equals(smallestKey, that.smallestKey) &&
                 Arrays.equals(largestKey, that.largestKey);
     }
@@ -102,7 +116,8 @@ public class FileMetaData {
         result = 31 * result + Long.hashCode(fileSize);
         result = 31 * result + Arrays.hashCode(smallestKey);
         result = 31 * result + Arrays.hashCode(largestKey);
-        result = 31 * result + allowedSeeks;
+        // === 修复 P6: 使用原子变量的值 ===
+        result = 31 * result + allowedSeeks.get();
         return result;
     }
 

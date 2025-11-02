@@ -11,7 +11,7 @@ import java.util.Comparator;
 import java.util.Objects;
 
 /**
- * SSTable构建器（改进版）
+ * SSTable构建器（改进版）- 修复索引块溢出问题
  */
 public class TableBuilder implements AutoCloseable {
     private final FileChannel fileChannel;
@@ -52,12 +52,36 @@ public class TableBuilder implements AutoCloseable {
                 StandardOpenOption.WRITE,
                 StandardOpenOption.TRUNCATE_EXISTING);
 
+        // ✅ 修复：动态计算索引块大小，防止索引块溢出
+        int indexBlockSize = calculateDynamicIndexBlockSize(blockSize);
+
         this.dataBlockBuilder = new BlockBuilder(blockSize, comparator);
-        this.indexBlockBuilder = new BlockBuilder(blockSize * 2, comparator); // 索引块可以大一些
+        this.indexBlockBuilder = new BlockBuilder(indexBlockSize, comparator);
         this.offset = 0;
         this.closed = false;
         this.entryCount = 0;
         this.blockCount = 0;
+
+        System.out.println("TableBuilder initialized: dataBlock=" + blockSize +
+                "B, indexBlock=" + indexBlockSize + "B");
+    }
+
+    /**
+     * ✅ 动态计算索引块大小 - 防止索引块溢出
+     */
+    private int calculateDynamicIndexBlockSize(int dataBlockSize) {
+        // 策略：索引块大小 = max(数据块×4, 64KB, min(2MB, 数据块×16))
+        int minSize = 64 * 1024;                    // 最小64KB，确保足够空间
+        int basedOnDataBlock = dataBlockSize * 4;   // 数据块的4倍
+        int maxReasonable = Math.min(2 * 1024 * 1024, dataBlockSize * 16); // 最大2MB或16倍
+
+        int calculatedSize = Math.max(minSize, Math.min(maxReasonable, basedOnDataBlock));
+
+        System.out.println("Index block size calculation: dataBlock=" + dataBlockSize +
+                ", min=" + minSize + ", base=" + basedOnDataBlock +
+                ", max=" + maxReasonable + ", final=" + calculatedSize);
+
+        return calculatedSize;
     }
 
     private double validateThreshold(double threshold) {
@@ -85,6 +109,14 @@ public class TableBuilder implements AutoCloseable {
         // 添加到布隆过滤器
         filter.add(key);
         entryCount++;
+
+        // 监控索引块使用情况（每100个条目检查一次）
+        if (entryCount % 100 == 0) {
+            IndexBlockStats stats = getIndexBlockStats();
+            if (stats.getUsageRatio() > 0.7) {
+                System.err.println("WARNING: Index block usage high: " + stats);
+            }
+        }
 
         // 尝试添加到当前数据块
         if (!dataBlockBuilder.tryAdd(key, value)) {
@@ -154,16 +186,20 @@ public class TableBuilder implements AutoCloseable {
         // 写入数据块
         BlockHandle dataHandle = writeRawBlock(blockData);
 
-        // 添加到索引块 - 使用键范围而不是最后一个键
+        // ✅ 修复：添加到索引块，包含详细的错误信息
         addIndexEntry(dataBlockBuilder.getKeyRange(), dataHandle);
 
         // 重置数据块构建器
         dataBlockBuilder.reset();
         blockCount++;
+
+        System.out.println("Flushed data block #" + blockCount +
+                ", index entries: " + indexBlockBuilder.entryCount() +
+                ", index usage: " + String.format("%.1f%%", getIndexBlockStats().getUsageRatio() * 100));
     }
 
     /**
-     * 添加索引条目（使用键范围）
+     * ✅ 修复：改进的索引条目添加方法，提供详细错误信息
      */
     private void addIndexEntry(BlockBuilder.KeyRange keyRange, BlockHandle handle) throws IOException {
         if (keyRange == null) {
@@ -173,11 +209,13 @@ public class TableBuilder implements AutoCloseable {
         byte[] handleEncoding = encodeBlockHandle(handle);
 
         // 使用数据块的最后一个键作为索引键
-        // 这样索引查找时：index_key[i-1] < target_key <= index_key[i] 表示在第i个数据块
         byte[] indexKey = keyRange.getLastKey();
         if (!indexBlockBuilder.tryAdd(indexKey, handleEncoding)) {
-            // 如果索引块也满了，需要特殊处理（通常不会发生，因为索引块更大）
-            throw new IOException("Index block overflow");
+            // ✅ 修复：提供详细的错误信息，帮助调试
+            IndexBlockStats stats = getIndexBlockStats();
+            throw new IOException("Index block overflow. " + stats +
+                    ". Current data blocks: " + blockCount +
+                    ". Consider increasing index block size in TableBuilder constructor.");
         }
     }
 
@@ -191,6 +229,9 @@ public class TableBuilder implements AutoCloseable {
         if (!dataBlockBuilder.isEmpty()) {
             flushDataBlock();
         }
+
+        // 输出构建统计信息
+        System.out.println("Table build completed: " + getStats());
 
         // 写入元数据块（布隆过滤器）- 确保不为空
         byte[] filterData = filter.getFilter();
@@ -213,6 +254,11 @@ public class TableBuilder implements AutoCloseable {
 
         fileChannel.force(true);
         closed = true;
+
+        System.out.println("SSTable finished: " + getFilePath() +
+                ", size: " + getFileSize() + " bytes" +
+                ", entries: " + getEntryCount() +
+                ", blocks: " + getBlockCount());
     }
 
     /**
@@ -259,7 +305,6 @@ public class TableBuilder implements AutoCloseable {
         }
 
         offset += written;
-        System.out.println("Block written, new offset: " + offset);
         return new BlockHandle(blockOffset, blockSize);
     }
 
@@ -283,8 +328,6 @@ public class TableBuilder implements AutoCloseable {
         // 重置position到0，准备读取
         buffer.flip();
 
-        System.out.println("Footer buffer - position: " + buffer.position() + ", limit: " + buffer.limit() + ", capacity: " + buffer.capacity());
-
         // 写入到当前offset位置（文件末尾）
         int written = 0;
         while (buffer.hasRemaining()) {
@@ -296,7 +339,6 @@ public class TableBuilder implements AutoCloseable {
                     Footer.ENCODED_LENGTH + ", Actual: " + written);
         }
 
-        System.out.println("Footer written: " + written + " bytes at offset: " + offset);
         offset += written;
     }
 
@@ -379,6 +421,18 @@ public class TableBuilder implements AutoCloseable {
     }
 
     /**
+     * ✅ 新增：获取索引块详细统计信息
+     */
+    public IndexBlockStats getIndexBlockStats() {
+        return new IndexBlockStats(
+                indexBlockBuilder.entryCount(),
+                indexBlockBuilder.currentSize(),
+                indexBlockBuilder.getBlockSize(),
+                indexBlockBuilder.getUsageRatio()
+        );
+    }
+
+    /**
      * 手动触发数据块刷新（用于测试和特殊场景）
      */
     public void flush() throws IOException {
@@ -391,6 +445,34 @@ public class TableBuilder implements AutoCloseable {
      */
     public BuildStats getStats() {
         return new BuildStats(entryCount, blockCount, dataBlockBuilder.entryCount());
+    }
+
+    /**
+     * ✅ 新增：索引块统计信息类
+     */
+    public static class IndexBlockStats {
+        private final int entryCount;
+        private final int currentSize;
+        private final int blockSize;
+        private final double usageRatio;
+
+        public IndexBlockStats(int entryCount, int currentSize, int blockSize, double usageRatio) {
+            this.entryCount = entryCount;
+            this.currentSize = currentSize;
+            this.blockSize = blockSize;
+            this.usageRatio = usageRatio;
+        }
+
+        public int getEntryCount() { return entryCount; }
+        public int getCurrentSize() { return currentSize; }
+        public int getBlockSize() { return blockSize; }
+        public double getUsageRatio() { return usageRatio; }
+
+        @Override
+        public String toString() {
+            return String.format("IndexBlockStats{entries=%d, size=%d/%d, usage=%.1f%%}",
+                    entryCount, currentSize, blockSize, usageRatio * 100);
+        }
     }
 
     /**

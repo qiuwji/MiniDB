@@ -195,14 +195,43 @@ public class Block {
         }
 
         /**
-         * 估算条目数量 - 基于实际数据大小进行估算
+         * 通过实际解析数据区域来计算准确的条目数量
          */
         private int getEntryCount() {
             if (restartsOffset == 0) return 0;
 
-            // 简单估算：假设平均每个条目占用20字节
-            int estimatedEntries = restartsOffset / 20;
-            return Math.max(estimatedEntries, numRestarts);
+            int count = 0;
+            int currentPos = 0;
+
+            try {
+                ByteBuffer buffer = ByteBuffer.wrap(data);
+
+                while (currentPos < restartsOffset) {
+                    buffer.position(currentPos);
+
+                    // 读取记录头
+                    int shared = buffer.getInt();
+                    int nonShared = buffer.getInt();
+                    int valueLen = buffer.getInt();
+
+                    // 验证数据有效性
+                    if (shared < 0 || nonShared < 0 || valueLen < 0) {
+                        break; // 无效数据
+                    }
+
+                    int entrySize = 12 + nonShared + valueLen; // 头部12字节 + 非共享键 + 值
+                    if (currentPos + entrySize > restartsOffset) {
+                        break; // 超出数据区域
+                    }
+
+                    count++;
+                    currentPos += entrySize;
+                }
+            } catch (Exception e) {
+                // 解析过程中出现异常，返回当前已计算的计数
+            }
+
+            return count;
         }
 
         /**

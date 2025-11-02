@@ -7,6 +7,7 @@ import com.qiu.iterator.DBIterator;
 import com.qiu.memory.MemTable;
 import com.qiu.sstable.TableBuilder;
 import com.qiu.version.FileMetaData;
+import com.qiu.version.Version;
 import com.qiu.version.VersionEdit;
 import com.qiu.version.VersionSet;
 import com.qiu.wal.WAL;
@@ -14,10 +15,12 @@ import com.qiu.wal.WAL;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * MiniDB 完整实现
+ * (修复了并发安全问题和版本引用计数问题)
  */
 public class MiniDB implements DB {
     private final String dbPath;
@@ -63,15 +66,18 @@ public class MiniDB implements DB {
         this.closed = false;
         this.backgroundCompactionScheduled = false;
 
-        // 恢复流程：先恢复目录中所有历史 WAL，再创建新的 WAL 供后续写入
+        // 恢复流程：恢复现有的WAL，但不自动创建新的
         recoverExistingWALs();
 
-        // 创建新的 WAL 文件供后续写入
-        this.currentLogNumber = versionSet.getNextFileNumber();
-        this.wal = new WAL(versionSet.getWALFileName(currentLogNumber));
+        // 只有在没有WAL文件时才创建新的
+        if (this.wal == null) {
+            this.currentLogNumber = versionSet.getNextFileNumber();
+            this.wal = new WAL(versionSet.getWALFileName(currentLogNumber));
+            System.out.println("Created new WAL file: " + wal.getFilePath());
+        }
 
         System.out.println("MiniDB opened successfully: " + dbPath);
-        System.out.println("WAL file: " + wal.getFilePath());
+        System.out.println("Current WAL: " + (wal != null ? wal.getFilePath() : "None"));
         System.out.println("Options: " + options);
     }
 
@@ -116,8 +122,12 @@ public class MiniDB implements DB {
         }
 
         // 检查SSTable（通过 VersionSet.current()）
+        Version currentVersion = null; // 声明在 try 块外部
         try {
-            byte[] value = versionSet.current().get(key);
+            // 获取当前版本并增加引用计数
+            currentVersion = versionSet.current();
+
+            byte[] value = currentVersion.get(key);
             if (value != null) {
                 successfulGets.incrementAndGet();
             }
@@ -125,6 +135,11 @@ public class MiniDB implements DB {
         } catch (Exception e) {
             System.err.println("Error reading from SSTable: " + e.getMessage());
             return null;
+        } finally {
+            // === 关键修复：确保版本引用计数减少 ===
+            if (currentVersion != null) {
+                currentVersion.unref();
+            }
         }
     }
 
@@ -146,7 +161,7 @@ public class MiniDB implements DB {
      * 写入：为整个 batch 分配连续的起始序号
      */
     @Override
-    public Status write(WriteBatch batch) throws IOException {
+    public synchronized Status write(WriteBatch batch) throws IOException {
         checkNotClosed();
         Objects.requireNonNull(batch, "Write batch cannot be null");
 
@@ -158,15 +173,15 @@ public class MiniDB implements DB {
         long startSeq = sequenceNumber.getAndAdd(batch.size());
 
         try {
-            // [NEW] 将起始序列号保存到 WriteBatch 中，以便 WAL 序列化
+            // 将起始序列号保存到 WriteBatch 中，以便 WAL 序列化
             batch.setSequenceNumber(startSeq);
 
-            // 先应用到 memTable（确保内存状态一致）
-            applyBatchToMemTable(memTable, batch, startSeq);
-
-            // 然后写入 WAL（确保持久化）
+            // 写入 WAL（确保持久化）
             wal.write(batch);
             wal.flush(); // 确保数据刷盘
+
+            // 应用到 memTable（确保内存状态一致）
+            applyBatchToMemTable(memTable, batch, startSeq);
 
             // 检查是否需要切换内存表
             if (memTable.approximateSize() > options.getMemtableSize()) {
@@ -179,7 +194,6 @@ public class MiniDB implements DB {
 
         } catch (IOException e) {
             System.err.println("Write failed: " + e.getMessage());
-            // 回滚内存状态？这里需要谨慎处理
             return Status.IO_ERROR;
         }
     }
@@ -187,7 +201,9 @@ public class MiniDB implements DB {
     @Override
     public DBIterator iterator() throws IOException {
         checkNotClosed();
-        return new DBIterator(versionSet.current(), memTable, immutableMemTable);
+        // 获取引用，迭代器内部会在关闭时 unref
+        Version currentVersion = versionSet.current();
+        return new DBIterator(currentVersion, memTable, immutableMemTable);
     }
 
     @Override
@@ -198,18 +214,27 @@ public class MiniDB implements DB {
         }
 
         // 估算SSTable数量和数据大小
-        long sstableCount = versionSet.current().getTotalFileCount();
-        long totalDataSize = versionSet.getDatabaseStats().getTotalSize();
+        // 为了安全获取 Version，这里使用 try-finally 确保 unref
+        Version currentVersion = null;
+        try {
+            currentVersion = versionSet.current();
+            long sstableCount = currentVersion.getTotalFileCount();
+            long totalDataSize = versionSet.getDatabaseStats().getTotalSize();
 
-        return new DBStats(
-                totalPuts.get(),
-                totalGets.get(),
-                totalDeletes.get(),
-                successfulGets.get(),
-                memtableSize,
-                sstableCount,
-                totalDataSize
-        );
+            return new DBStats(
+                    totalPuts.get(),
+                    totalGets.get(),
+                    totalDeletes.get(),
+                    successfulGets.get(),
+                    memtableSize,
+                    sstableCount,
+                    totalDataSize
+            );
+        } finally {
+            if (currentVersion != null) {
+                currentVersion.unref();
+            }
+        }
     }
 
     @Override
@@ -270,84 +295,116 @@ public class MiniDB implements DB {
     }
 
     /**
-     * 恢复数据库状态
-     * [MODIFIED] 重构以使用 WAL 中恢复的原始序列号
+     * 恢复数据库状态 - 修复版：恢复现有的WAL，设置当前的wal引用
      */
     private void recoverExistingWALs() throws IOException {
         java.nio.file.Path dir = java.nio.file.Path.of(dbPath);
         if (!java.nio.file.Files.exists(dir)) {
             java.nio.file.Files.createDirectories(dir);
-            return;
+            return; // 新数据库，没有WAL文件
         }
 
-        var stream = java.nio.file.Files.list(dir);
-        try {
-            var files = stream
+        try (var stream = java.nio.file.Files.list(dir)) {
+            // 找到编号最大的WAL文件（最新的）
+            Optional<Path> latestWAL = stream
                     .filter(p -> p.getFileName().toString().matches("\\d+\\.log"))
-                    .sorted((a, b) -> {
+                    .max((a, b) -> {
                         long na = Long.parseLong(a.getFileName().toString().replace(".log", ""));
                         long nb = Long.parseLong(b.getFileName().toString().replace(".log", ""));
                         return Long.compare(na, nb);
-                    })
-                    .toList();
+                    });
 
-            // [MODIFIED] 跟踪恢复的最大序列号
+            if (latestWAL.isEmpty()) {
+                System.out.println("No WAL files found for recovery.");
+                return; // 没有WAL文件，让构造函数创建新的
+            }
+
+            String latestWalPath = latestWAL.get().toString();
+            long walNumber = Long.parseLong(latestWAL.get().getFileName().toString().replace(".log", ""));
+
+            System.out.println("Recovering from existing WAL file: " + latestWalPath);
+
+            // [FIXED] 使用现有的WAL文件作为当前的wal
+            this.currentLogNumber = walNumber;
+            this.wal = new WAL(latestWalPath);
+
             long maxRecoveredSeq = -1;
             int recoveredBatches = 0;
             int recoveredRecords = 0;
 
-            for (var p : files) {
-                String path = p.toString();
-                System.out.println("Recovering WAL file: " + path);
-                try (WAL oldWal = new WAL(path)) {
-                    var batches = oldWal.recover();
-                    for (var batch : batches) {
-                        if (batch != null && !batch.isEmpty()) {
+            try {
+                var batches = this.wal.recover(); // 使用当前的wal恢复
+                for (var batch : batches) {
+                    if (batch != null && !batch.isEmpty()) {
+                        long originalSeq = batch.getSequenceNumber();
 
-                            // [MODIFIED] 从 batch 中获取原始序列号
-                            long originalSeq = batch.getSequenceNumber();
-
-                            if (originalSeq == -1) {
-                                // 序列号无效 (可能是旧格式的WAL或已损坏)
-                                System.err.println("Warning: Recovered batch with invalid sequence number (-1) from " + path + ". Skipping batch.");
-                                continue;
-                            }
-
-                            // [MODIFIED] 使用原始序列号应用到 memTable
-                            applyBatchToMemTable(memTable, batch, originalSeq);
-
-                            // [MODIFIED] 更新 maxRecoveredSeq
-                            long lastSeqInBatch = originalSeq + batch.size() - 1;
-                            if (lastSeqInBatch > maxRecoveredSeq) {
-                                maxRecoveredSeq = lastSeqInBatch;
-                            }
-
-                            recoveredBatches++;
-                            recoveredRecords += batch.size();
-
-                            System.out.printf("Recovered batch with %d operations, original seq: %d%n",
-                                    batch.size(), originalSeq);
+                        if (originalSeq == -1) {
+                            System.err.println("Warning: Recovered batch with invalid sequence number from " + latestWalPath);
+                            continue;
                         }
+
+                        // 应用到memTable
+                        applyBatchToMemTable(memTable, batch, originalSeq);
+
+                        // 更新最大序列号
+                        long lastSeqInBatch = originalSeq + batch.size() - 1;
+                        if (lastSeqInBatch > maxRecoveredSeq) {
+                            maxRecoveredSeq = lastSeqInBatch;
+                        }
+
+                        recoveredBatches++;
+                        recoveredRecords += batch.size();
+
+                        System.out.printf("Recovered batch with %d operations, original seq: %d%n",
+                                batch.size(), originalSeq);
                     }
-                } catch (Exception e) {
-                    System.err.println("Failed to recover WAL file " + path + ": " + e.getMessage());
-                    // 不中断，继续尝试恢复其余日志
                 }
+            } catch (Exception e) {
+                System.err.println("Failed to recover WAL file " + latestWalPath + ": " + e.getMessage());
+                // 恢复失败，关闭当前的wal，让构造函数创建新的
+                if (this.wal != null) {
+                    this.wal.close();
+                    this.wal = null;
+                }
+                throw e;
             }
 
-            // [MODIFIED] 将全局序列号计数器设置为恢复的最大值 + 1
+            // 设置全局序列号
             if (maxRecoveredSeq != -1) {
                 sequenceNumber.set(maxRecoveredSeq + 1);
             }
 
-            System.out.println("Recovered " + recoveredBatches + " write batches (" +
-                    recoveredRecords + " records) from WAL files.");
+            System.out.println("Recovery completed: " + recoveredBatches + " batches (" +
+                    recoveredRecords + " records) recovered from " + latestWalPath);
             System.out.println("Next sequence number set to: " + sequenceNumber.get());
 
-            // 如果恢复后内存表过大，立即切换
-            if (memTable.approximateSize() > options.getMemtableSize()) {
-                System.out.println("MemTable too large after recovery, switching...");
-                switchMemTable();
+        }
+    }
+
+    /**
+     * 删除比指定WAL文件更旧的文件
+     */
+    private void deleteOlderWALFiles(Path latestRecoveredWal) throws IOException {
+        long recoveredNumber = Long.parseLong(latestRecoveredWal.getFileName().toString().replace(".log", ""));
+
+        var stream = java.nio.file.Files.list(java.nio.file.Path.of(dbPath));
+        try {
+            var olderFiles = stream
+                    .filter(p -> {
+                        String fileName = p.getFileName().toString();
+                        if (!fileName.matches("\\d+\\.log")) return false;
+                        long fileNumber = Long.parseLong(fileName.replace(".log", ""));
+                        return fileNumber < recoveredNumber;
+                    })
+                    .toList();
+
+            for (var oldFile : olderFiles) {
+                try {
+                    java.nio.file.Files.delete(oldFile);
+                    System.out.println("Deleted old WAL file: " + oldFile.getFileName());
+                } catch (IOException e) {
+                    System.err.println("Failed to delete old WAL: " + oldFile.getFileName());
+                }
             }
         } finally {
             stream.close();
@@ -451,7 +508,7 @@ public class MiniDB implements DB {
 
             while (iter.isValid()) {
                 byte[] userKey = iter.key().getUserKey();
-                // 如果同一个 userKey 的后续版本，跳过
+                // 如果同一个 userKey 的后续版本，跳过（只保留最新版本）
                 if (lastUserKey != null && java.util.Arrays.equals(userKey, lastUserKey)) {
                     iter.next();
                     continue;
@@ -605,14 +662,23 @@ public class MiniDB implements DB {
      * 获取数据库状态信息
      */
     public DBStatus getStatus() {
-        return new DBStatus(
-                !closed,
-                memTable.size(),
-                immutableMemTable != null ? immutableMemTable.size() : 0,
-                backgroundCompactionScheduled,
-                versionSet.getActiveVersionCount(),
-                versionSet.current().getTotalFileCount()
-        );
+        // 为了安全获取 Version，这里使用 try-finally 确保 unref
+        Version currentVersion = null;
+        try {
+            currentVersion = versionSet.current();
+            return new DBStatus(
+                    !closed,
+                    memTable.size(),
+                    immutableMemTable != null ? immutableMemTable.size() : 0,
+                    backgroundCompactionScheduled,
+                    versionSet.getActiveVersionCount(),
+                    currentVersion.getTotalFileCount()
+            );
+        } finally {
+            if (currentVersion != null) {
+                currentVersion.unref();
+            }
+        }
     }
 
     /**

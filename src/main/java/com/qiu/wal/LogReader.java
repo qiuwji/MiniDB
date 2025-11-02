@@ -2,7 +2,6 @@ package com.qiu.wal;
 
 import com.qiu.util.CRC32;
 
-import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;

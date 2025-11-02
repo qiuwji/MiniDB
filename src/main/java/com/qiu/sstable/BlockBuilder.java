@@ -14,11 +14,11 @@ public class BlockBuilder {
     private final List<byte[]> values;
     private final int blockSize;
     private final Comparator<byte[]> comparator;
-    private final int restartInterval;
+    private final int restartInterval; // 重启点间隔
 
     private int currentSize;
-    private byte[] lastKey;
-    private final List<Integer> restartPositions;
+    private byte[] lastKey; // 上一个添加的键（用于前缀压缩和顺序验证）
+    private final List<Integer> restartPositions;  // 重启点位置列表
 
     public BlockBuilder(int blockSize) {
         this(blockSize, new com.qiu.util.BytewiseComparator(), 16);
