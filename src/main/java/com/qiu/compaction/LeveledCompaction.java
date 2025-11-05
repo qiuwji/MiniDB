@@ -11,12 +11,13 @@ import java.util.Objects;
  * 层级压缩策略（LevelDB风格，简化实现）
  */
 public class LeveledCompaction implements CompactionStrategy {
+
     private final VersionSet versionSet;
     private final long maxFileSize;
     private final long[] levelMaxBytes;
 
     public LeveledCompaction(VersionSet versionSet) {
-        this(versionSet, 2 * 1024 * 1024); // 默认2MB文件大小阈值
+        this(versionSet, 4 * 1024 * 1024); // 默认2MB文件大小阈值
     }
 
     public LeveledCompaction(VersionSet versionSet, long maxFileSize) {

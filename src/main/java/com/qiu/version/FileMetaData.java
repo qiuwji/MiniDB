@@ -15,7 +15,6 @@ public class FileMetaData {
     private final byte[] smallestKey;
     private final byte[] largestKey;
 
-    // === 修复 P6: 'allowedSeeks' 是可变状态，必须是原子的 ===
     // 它可能被多个线程（如 compaction 检查）并发访问
     private final AtomicInteger allowedSeeks;
 

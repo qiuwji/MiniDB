@@ -13,7 +13,7 @@
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter-api</artifactId>
-            <version>5.10.0</version> <!-- 最新稳定版 -->
+            <version>5.10.0</version>
             <scope>test</scope>
         </dependency>
 
@@ -24,6 +24,23 @@
             <version>5.10.0</version>
             <scope>test</scope>
         </dependency>
+
+        <!-- Mockito 核心库，用于创建和操作模拟对象 -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <version>5.5.0</version>
+            <scope>test</scope> <!-- 仅在测试阶段生效 -->
+        </dependency>
+
+        <!-- Mockito 与 JUnit 5 集成支持，提供 @Mock、@InjectMocks 等注解的自动处理 -->
+        <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-junit-jupiter</artifactId>
+            <version>5.5.0</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <properties>

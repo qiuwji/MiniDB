@@ -10,7 +10,7 @@ import java.util.List;
 import java.util.PriorityQueue;
 
 /**
- * 合并多个表迭代器，按键顺序返回数据（去重，保留第一次出现的版本）
+ * 合并多个表迭代器，按键顺序返回数据（去重，保留最新版本）
  */
 public class MergingIterator {
     private final PriorityQueue<IteratorWrapper> heap;
@@ -32,7 +32,7 @@ public class MergingIterator {
             }
         }
 
-        // 不使用可能为 0 的初始容量构造 PriorityQueue，直接通过 Comparator 构造它（JDK 使用默认容量）
+        // <-- 修改点 1: 修复比较器 (Comparator) -->
         this.heap = new PriorityQueue<>( (a, b) -> {
             // 可能发生 currentKey 为 null 的情况，做空检查以保证 Comparator 稳定
             byte[] ka = a.currentKey();
@@ -40,8 +40,19 @@ public class MergingIterator {
             if (ka == null && kb == null) return 0;
             if (ka == null) return 1;
             if (kb == null) return -1;
-            return comparator.compare(ka, kb);
+
+            // 1. 比较 Key
+            int keyCmp = comparator.compare(ka, kb);
+            if (keyCmp != 0) {
+                return keyCmp;
+            }
+
+            // 2. Key 相同，比较 FileNumber (DESCENDING - 倒序)
+            // fileNumber 越大 = 越新 = 优先级越高（值越小）
+            return Long.compare(b.getFileNumber(), a.getFileNumber());
         });
+        // <-- 结束修改点 1 -->
+
 
         // 将所有有效迭代器加入堆
         for (IteratorWrapper w : wrappers) {
@@ -70,11 +81,12 @@ public class MergingIterator {
     public void next() {
         if (!isValid()) return;
 
-        // 推进当前底层迭代器
-        current.iter.next();
         if (current.isValid()) {
-            current.updateCurrent();
-            heap.offer(current);
+            current.iter.next();
+            if (current.isValid()) {
+                current.updateCurrent();
+                heap.offer(current);
+            }
         }
         advance();
     }
@@ -111,7 +123,7 @@ public class MergingIterator {
 
         current = heap.poll();
 
-        // 跳过与堆顶相同键的重复项（保留第一次出现）
+        // 跳过与堆顶相同键的重复项（保留第一次出现，即版本最新的）
         while (!heap.isEmpty() && Arrays.equals(current.currentKey(), heap.peek().currentKey())) {
             IteratorWrapper dup = heap.poll();
             dup.iter.next();
@@ -125,13 +137,16 @@ public class MergingIterator {
     /**
      * 包装底层表迭代器
      */
+    // <-- 修改点 2: IteratorWrapper -->
     private static class IteratorWrapper {
         final TableIterator iter;
         private byte[] currentKey;
         private byte[] currentValue;
+        private final long fileNumber; // 添加 fileNumber
 
         IteratorWrapper(TableIterator iter) {
             this.iter = iter;
+            this.fileNumber = iter.getFileNumber(); // 获取 fileNumber
             updateCurrent();
         }
 
@@ -151,16 +166,26 @@ public class MergingIterator {
 
         byte[] currentKey() { return currentKey; }
         byte[] currentValue() { return currentValue; }
+        long getFileNumber() { return fileNumber; } // 添加 getter
     }
+    // <-- 结束修改点 2 -->
+
 
     /**
      * 表迭代器适配器（包装你项目中的 com.qiu.sstable.TableIterator）
      */
+    // <-- 修改点 3: TableIterator -->
     public static class TableIterator {
         private final com.qiu.sstable.SSTable.TableIterator delegate;
+        private final long fileNumber; // 添加 fileNumber
 
-        public TableIterator(com.qiu.sstable.SSTable.TableIterator delegate) {
+        public TableIterator(com.qiu.sstable.SSTable.TableIterator delegate, long fileNumber) {
             this.delegate = delegate;
+            this.fileNumber = fileNumber; // 修改构造函数
+        }
+
+        public long getFileNumber() { // 添加 getter
+            return fileNumber;
         }
 
         public boolean isValid() {
@@ -177,7 +202,9 @@ public class MergingIterator {
 
         public void next() {
             try {
-                delegate.next();
+                if (delegate.isValid()) {
+                    delegate.next();
+                }
             } catch (IOException e) {
                 throw new RuntimeException("Failed to advance underlying iterator", e);
             }
@@ -199,4 +226,5 @@ public class MergingIterator {
             }
         }
     }
+    // <-- 结束修改点 3 -->
 }

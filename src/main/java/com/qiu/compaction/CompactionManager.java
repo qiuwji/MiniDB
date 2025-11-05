@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 压缩管理器，负责调度和执行压缩任务
  */
 public class CompactionManager implements AutoCloseable {
+
     private final VersionSet versionSet;
     private final CompactionStrategy strategy;
     private final BlockingQueue<Compaction> compactionQueue;
@@ -93,7 +94,11 @@ public class CompactionManager implements AutoCloseable {
      */
     public void resume() {
         paused.set(false);
-        requestCompaction(); // 触发一次压缩检查
+        // 注意：这里不需要手动 requestCompaction()，
+        // worker 线程会自动解除阻塞并继续处理队列，
+        // 并且在 executeCompaction 结束时会触发 requestCompaction。
+        // 如果希望在 resume 时立即检查，可以保留：
+        // requestCompaction();
     }
 
     /**
@@ -142,14 +147,28 @@ public class CompactionManager implements AutoCloseable {
     private void compactionWorker() {
         while (running.get()) {
             try {
+                // <-- 修改点 1: 修复暂停逻辑 -->
+                // 在 take() 之前检查暂停状态
+                while (paused.get() && running.get()) {
+                    try {
+                        // 处于暂停状态，循环等待
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        if (!running.get()) break; // 响应关闭
+                        Thread.currentThread().interrupt();
+                    }
+                }
+
+                // 如果在暂停时被关闭，则退出
+                if (!running.get()) {
+                    break;
+                }
+                // <-- 结束修改点 1 -->
+
+                // 现在安全地拿任务
                 Compaction compaction = compactionQueue.take();
 
-                if (paused.get()) {
-                    // 如果暂停，将压缩任务重新放回队列
-                    compactionQueue.put(compaction);
-                    Thread.sleep(1000); // 等待1秒
-                    continue;
-                }
+                // (旧的 "if (paused.get()) { put() ... }" 逻辑已移除)
 
                 executeCompaction(compaction);
 

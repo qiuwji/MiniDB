@@ -12,6 +12,7 @@ import java.util.Objects;
 
 /**
  * SSTable构建器（改进版）- 修复索引块溢出问题
+ * (应用了 Compaction 修复)
  */
 public class TableBuilder implements AutoCloseable {
     private final FileChannel fileChannel;
@@ -24,6 +25,7 @@ public class TableBuilder implements AutoCloseable {
     private BlockBuilder dataBlockBuilder;
     private BlockBuilder indexBlockBuilder;
     private byte[] lastKey;
+    private byte[] firstKey; // <-- 修改点 1: 添加 firstKey
     private long offset;
     private boolean closed;
     private int entryCount;
@@ -61,6 +63,7 @@ public class TableBuilder implements AutoCloseable {
         this.closed = false;
         this.entryCount = 0;
         this.blockCount = 0;
+        this.firstKey = null; // 显式初始化
 
         System.out.println("TableBuilder initialized: dataBlock=" + blockSize +
                 "B, indexBlock=" + indexBlockSize + "B");
@@ -70,7 +73,7 @@ public class TableBuilder implements AutoCloseable {
      * ✅ 动态计算索引块大小 - 防止索引块溢出
      */
     private int calculateDynamicIndexBlockSize(int dataBlockSize) {
-        // 策略：索引块大小 = max(数据块×4, 64KB, min(2MB, 数据块×16))
+        // ... (省略未修改的代码) ...
         int minSize = 64 * 1024;                    // 最小64KB，确保足够空间
         int basedOnDataBlock = dataBlockSize * 4;   // 数据块的4倍
         int maxReasonable = Math.min(2 * 1024 * 1024, dataBlockSize * 16); // 最大2MB或16倍
@@ -98,6 +101,11 @@ public class TableBuilder implements AutoCloseable {
         checkNotClosed();
         Objects.requireNonNull(key, "Key cannot be null");
         Objects.requireNonNull(value, "Value cannot be null");
+
+        // <-- 修改点 2: 记录第一个键
+        if (this.firstKey == null) {
+            this.firstKey = key.clone();
+        }
 
         // 检查键的顺序
         if (lastKey != null && comparator.compare(key, lastKey) <= 0) {
@@ -145,6 +153,7 @@ public class TableBuilder implements AutoCloseable {
      * 处理超大数据条目
      */
     private void handleOversizedEntry(byte[] key, byte[] value) throws IOException {
+        // ... (省略未修改的代码) ...
         int singleEntrySize = estimateSingleEntrySize(key, value);
 
         if (singleEntrySize > blockSize * 2) {
@@ -169,6 +178,7 @@ public class TableBuilder implements AutoCloseable {
      * 估算单条记录大小
      */
     private int estimateSingleEntrySize(byte[] key, byte[] value) {
+        // ... (省略未修改的代码) ...
         return 12 + key.length + value.length + 8; // 基础格式 + 重启点开销
     }
 
@@ -176,6 +186,7 @@ public class TableBuilder implements AutoCloseable {
      * 刷写数据块到文件
      */
     private void flushDataBlock() throws IOException {
+        // ... (省略未修改的代码) ...
         if (dataBlockBuilder.isEmpty()) {
             return;
         }
@@ -193,15 +204,16 @@ public class TableBuilder implements AutoCloseable {
         dataBlockBuilder.reset();
         blockCount++;
 
-        System.out.println("Flushed data block #" + blockCount +
-                ", index entries: " + indexBlockBuilder.entryCount() +
-                ", index usage: " + String.format("%.1f%%", getIndexBlockStats().getUsageRatio() * 100));
+//        System.out.println("Flushed data block #" + blockCount +
+//                ", index entries: " + indexBlockBuilder.entryCount() +
+//                ", index usage: " + String.format("%.1f%%", getIndexBlockStats().getUsageRatio() * 100));
     }
 
     /**
      * ✅ 修复：改进的索引条目添加方法，提供详细错误信息
      */
     private void addIndexEntry(BlockBuilder.KeyRange keyRange, BlockHandle handle) throws IOException {
+        // ... (省略未修改的代码) ...
         if (keyRange == null) {
             return;
         }
@@ -223,6 +235,7 @@ public class TableBuilder implements AutoCloseable {
      * 完成Table构建
      */
     public void finish() throws IOException {
+        // ... (省略未修改的代码) ...
         checkNotClosed();
 
         // 刷写最后一个数据块（如果有）
@@ -265,7 +278,7 @@ public class TableBuilder implements AutoCloseable {
      * 创建空的但有效的块数据
      */
     private byte[] createEmptyBlockData() {
-        // 创建一个最小的有效块：重启点数量为0
+        // ... (省略未修改的代码) ...
         ByteBuffer buffer = ByteBuffer.allocate(4);
         buffer.putInt(0); // numRestarts = 0
         return buffer.array();
@@ -275,6 +288,7 @@ public class TableBuilder implements AutoCloseable {
      * 放弃构建（删除文件）
      */
     public void abandon() throws IOException {
+        // ... (省略未修改的代码) ...
         if (!closed) {
             close();
             // 删除未完成文件
@@ -287,10 +301,11 @@ public class TableBuilder implements AutoCloseable {
      * 写入原始块数据
      */
     private BlockHandle writeRawBlock(byte[] data) throws IOException {
+        // ... (省略未修改的代码) ...
         long blockOffset = offset;
         int blockSize = data.length;
 
-        System.out.println("Writing block at offset: " + blockOffset + ", size: " + blockSize);
+        // System.out.println("Writing block at offset: " + blockOffset + ", size: " + blockSize);
 
         // 写入数据
         ByteBuffer buffer = ByteBuffer.wrap(data);
@@ -312,6 +327,7 @@ public class TableBuilder implements AutoCloseable {
      * 写入Footer
      */
     private void writeFooter(Footer footer) throws IOException {
+        // ... (省略未修改的代码) ...
         ByteBuffer buffer = ByteBuffer.allocate(Footer.ENCODED_LENGTH);
 
         // 编码元数据索引句柄
@@ -346,6 +362,7 @@ public class TableBuilder implements AutoCloseable {
      * 编码BlockHandle
      */
     private byte[] encodeBlockHandle(BlockHandle handle) {
+        // ... (省略未修改的代码) ...
         ByteBuffer buffer = ByteBuffer.allocate(16);
         buffer.putLong(handle.offset());
         buffer.putLong(handle.size());
@@ -354,6 +371,7 @@ public class TableBuilder implements AutoCloseable {
 
     @Override
     public void close() throws IOException {
+        // ... (省略未修改的代码) ...
         if (!closed) {
             try {
                 if (fileChannel != null) {
@@ -447,10 +465,22 @@ public class TableBuilder implements AutoCloseable {
         return new BuildStats(entryCount, blockCount, dataBlockBuilder.entryCount());
     }
 
+    // <-- 修改点 3: 添加 Getters -->
+    public byte[] getFirstKey() {
+        return firstKey;
+    }
+
+    public byte[] getLastKey() {
+        return lastKey;
+    }
+    // <-- 结束修改点 3 -->
+
+
     /**
      * ✅ 新增：索引块统计信息类
      */
     public static class IndexBlockStats {
+        // ... (省略未修改的代码) ...
         private final int entryCount;
         private final int currentSize;
         private final int blockSize;
@@ -479,6 +509,7 @@ public class TableBuilder implements AutoCloseable {
      * 构建统计信息
      */
     public static class BuildStats {
+        // ... (省略未修改的代码) ...
         private final int totalEntries;
         private final int totalBlocks;
         private final int currentBlockEntries;

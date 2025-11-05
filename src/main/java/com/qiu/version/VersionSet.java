@@ -1,14 +1,18 @@
 package com.qiu.version;
 
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 版本管理器，维护数据库的所有版本
- * (修复了线程安全问题)
+ * (修复了线程安全问题，添加安全文件删除功能)
  */
 public class VersionSet implements AutoCloseable {
     private final String dbPath;
@@ -23,6 +27,9 @@ public class VersionSet implements AutoCloseable {
     private final List<Version> obsoleteVersions;
 
     private Manifest manifest;
+
+    // === 新增：安全文件删除机制 ===
+    private final Set<Long> pendingDeletion = ConcurrentHashMap.newKeySet();
 
     public VersionSet(String dbPath) throws IOException {
         this(dbPath, 7); // 默认7个层级
@@ -55,7 +62,6 @@ public class VersionSet implements AutoCloseable {
      */
     public Version current() {
         // === 修复 P3: 增加引用，防止 'current' 在使用时被清理 ===
-        // (虽然在此特定实现中 'current' 总是被 activeVersions 持有，但这是良好实践)
         current.ref();
         return current;
     }
@@ -133,8 +139,67 @@ public class VersionSet implements AutoCloseable {
         // 写入Manifest
         manifest.writeEdit(edit);
 
+        // === 关键修复：安全删除文件，排除 trivial move 的情况 ===
+        for (VersionEdit.DeletedFile deletedFile : edit.getDeletedFiles()) {
+            long fileNumber = deletedFile.getFileNumber();
+
+            // 检查这个文件是否在新增文件列表中（trivial move 情况）
+            if (!isFileInNewFiles(edit, fileNumber)) {
+                safeDeleteFile(fileNumber);
+            } else {
+                System.out.println("Skipping deletion for trivial move file: " + fileNumber);
+            }
+        }
+
         // 切换到新版本
         appendVersion(newVersion);
+    }
+
+    /**
+     * 检查文件是否在新增文件列表中（用于识别 trivial move）
+     */
+    private boolean isFileInNewFiles(VersionEdit edit, long fileNumber) {
+        for (VersionEdit.LevelFile newFile : edit.getNewFiles()) {
+            if (newFile.getFile().getFileNumber() == fileNumber) {
+                return true; // 文件在删除列表也在新增列表 → trivial move
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 安全删除文件 - 防止重复删除
+     */
+    public synchronized void safeDeleteFile(long fileNumber) {
+        if (pendingDeletion.contains(fileNumber)) {
+            System.out.println("File " + fileNumber + " already deleted or pending deletion, skipping");
+            return;
+        }
+
+        try {
+            String tableFileName = getTableFileName(fileNumber);
+            Path filePath = Path.of(tableFileName);
+            if (Files.exists(filePath)) {
+                Files.delete(filePath);
+                pendingDeletion.add(fileNumber);
+                System.out.println("Safely deleted SSTable: " + filePath.getFileName());
+            } else {
+                System.out.println("File already deleted: " + filePath.getFileName());
+                pendingDeletion.add(fileNumber);
+            }
+        } catch (IOException e) {
+            System.err.println("Failed to delete file " + fileNumber + ": " + e.getMessage());
+            // 即使删除失败也标记，避免重复尝试
+            pendingDeletion.add(fileNumber);
+        }
+    }
+
+    /**
+     * 清理已删除文件记录
+     */
+    public void cleanupDeletedRecords() {
+        pendingDeletion.clear();
+        System.out.println("Cleared deleted files tracking");
     }
 
     /**
@@ -321,6 +386,9 @@ public class VersionSet implements AutoCloseable {
         if (manifest != null) {
             manifest.close();
         }
+
+        // 清理已删除文件记录
+        cleanupDeletedRecords();
 
         // 清理所有活跃版本：只在 refCount > 0 时调用 unref，避免重复释放
         for (Version version : activeVersions) {

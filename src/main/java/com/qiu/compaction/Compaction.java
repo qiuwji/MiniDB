@@ -95,8 +95,10 @@ public class Compaction {
     private void doTrivialMove() {
         FileMetaData inputFile = getInputs().get(0);
         int nextLevel = level + 1;
+
         edit.removeFile(level, inputFile.getFileNumber());
         edit.addFile(nextLevel, inputFile);
+
         System.out.printf("Trivial move: file %d from L%d to L%d%n",
                 inputFile.getFileNumber(), level, nextLevel);
     }
@@ -109,19 +111,22 @@ public class Compaction {
 
         byte[] lastKey = null;
         TableBuilder builder = null;
-        int outputLevel = (level == 0) ? 1 : level;
+
+        int outputLevel = (level == 0) ? 1 : level + 1;
+
+        // 确保输出层级不会超过最大层级
+        if (outputLevel >= versionSet.getMaxLevels()) {
+            outputLevel = versionSet.getMaxLevels() - 1;
+            if (level != 0 && level == outputLevel) {
+                System.err.println("Warning: Compacting last level back onto itself. This should not happen.");
+            }
+        }
 
         merging.seekToFirst();
         while (merging.isValid()) {
             byte[] key = merging.key();
             byte[] value = merging.value();
 
-            if (lastKey != null && Arrays.equals(key, lastKey)) {
-                merging.next();
-                continue;
-            }
-
-            // 删除标记：在这个实现中，用 null 表示 tombstone
             if (value == null) {
                 // skip
                 merging.next();
@@ -131,7 +136,11 @@ public class Compaction {
 
             if (builder == null || shouldFinishBuilder(builder)) {
                 if (builder != null) {
-                    finishBuilder(builder, outputLevel);
+                    if (builder.getEntryCount() > 0) {
+                        finishBuilder(builder, outputLevel);
+                    } else {
+                        builder.abandon();
+                    }
                 }
                 builder = startNewBuilder(outputLevel);
             }
@@ -142,7 +151,11 @@ public class Compaction {
         }
 
         if (builder != null) {
-            finishBuilder(builder, outputLevel);
+            if (builder.getEntryCount() > 0) {
+                finishBuilder(builder, outputLevel);
+            } else {
+                builder.abandon();
+            }
         }
 
         System.out.printf("Compaction completed: L%d -> L%d, inputs=%d, outputs=%d%n",
@@ -152,17 +165,15 @@ public class Compaction {
     private MergingIterator createMergingIterator() throws IOException {
         List<MergingIterator.TableIterator> tblIters = new ArrayList<>();
 
-        // 为每个输入文件打开 SSTable 并创建表迭代器包装器。
-        // 注意：SSTable 需要在迭代期间保持打开（这里不关闭）。
         for (FileMetaData inputFile : getInputs()) {
             String path = versionSet.getTableFileName(inputFile.getFileNumber());
             SSTable table = new SSTable(path);
             SSTable.TableIterator baseIter = table.iterator();
-            MergingIterator.TableIterator wrapped = new MergingIterator.TableIterator(baseIter);
+            MergingIterator.TableIterator wrapped = new MergingIterator.TableIterator(baseIter, inputFile.getFileNumber());
+
             if (wrapped.isValid()) {
                 tblIters.add(wrapped);
             } else {
-                // 即使当前不包含项，也保留迭代器（某些实现可能需要）
                 tblIters.add(wrapped);
             }
         }
@@ -180,10 +191,23 @@ public class Compaction {
     private void finishBuilder(TableBuilder builder, int outputLevel) throws IOException {
         builder.finish();
 
-        // 构建输出文件元数据（需要最小/最大键，简化用占位）
+        if (builder.getEntryCount() == 0) {
+            builder.abandon();
+            return;
+        }
+
         String outPath = builder.getFilePath();
         long fileNumber = parseFileNumberFromPath(outPath);
-        FileMetaData f = new FileMetaData(fileNumber, builder.getFileSize(), "min_key".getBytes(), "max_key".getBytes());
+
+        byte[] minKey = builder.getFirstKey();
+        byte[] maxKey = builder.getLastKey();
+
+        if (minKey == null || maxKey == null) {
+            builder.abandon();
+            throw new IOException("Compaction failed: Builder (file " + fileNumber + ") has entries but keys are null");
+        }
+
+        FileMetaData f = new FileMetaData(fileNumber, builder.getFileSize(), minKey, maxKey);
         outputs.add(f);
         edit.addFile(outputLevel, f);
     }
@@ -194,7 +218,6 @@ public class Compaction {
         try {
             return Long.parseLong(name);
         } catch (NumberFormatException e) {
-            // 如果文件名不是纯数字，尝试去掉前缀
             String digits = name.replaceAll("\\D", "");
             return digits.isEmpty() ? System.currentTimeMillis() : Long.parseLong(digits);
         }
@@ -209,26 +232,21 @@ public class Compaction {
     }
 
     private void installCompactionResults() throws IOException {
-        // 标记删除所有输入文件（按其实际层级）
+        // 只做逻辑删除标记，物理删除交给 VersionSet 处理
         for (FileMetaData in : getInputs()) {
             int lvl = getInputLevel(in);
             if (lvl >= 0) {
                 edit.removeFile(lvl, in.getFileNumber());
+                // 不再进行物理文件删除
             }
         }
 
-        // 将新文件写入 VersionSet（logAndApply 会把 edit 写入 manifest 并切换版本）
+        // 将新文件写入 VersionSet，物理删除在 VersionSet 中处理
         versionSet.logAndApply(edit);
     }
 
     private void cleanupOutputFiles() {
-        for (FileMetaData out : outputs) {
-            try {
-                java.nio.file.Files.deleteIfExists(Path.of(versionSet.getTableFileName(out.getFileNumber())));
-            } catch (IOException e) {
-                System.err.println("Failed to cleanup output file: " + e.getMessage());
-            }
-        }
+        // 只清理内存状态，不删除物理文件
         outputs.clear();
     }
 
@@ -240,11 +258,21 @@ public class Compaction {
     }
 
     private boolean filesOverlap(FileMetaData a, FileMetaData b) {
-        return !(compareKeys(a.getLargestKey(), b.getSmallestKey()) < 0 ||
-                compareKeys(a.getSmallestKey(), b.getLargestKey()) > 0);
+        if (a == null || b == null) return false;
+        byte[] aLargest = a.getLargestKey(), bSmallest = b.getSmallestKey();
+        byte[] aSmallest = a.getSmallestKey(), bLargest = b.getLargestKey();
+        if (aLargest == null || bSmallest == null || aSmallest == null || bLargest == null) {
+            return false;
+        }
+        return !(compareKeys(aLargest, bSmallest) < 0 ||
+                compareKeys(aSmallest, bLargest) > 0);
     }
 
     private int compareKeys(byte[] a, byte[] b) {
+        if (a == null && b == null) return 0;
+        if (a == null) return -1;
+        if (b == null) return 1;
+
         int min = Math.min(a.length, b.length);
         for (int i = 0; i < min; i++) {
             int c = Byte.compare(a[i], b[i]);

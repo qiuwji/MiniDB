@@ -14,7 +14,7 @@ public class MiniDBWALTest {
 
     public static void main(String[] args) {
         // 控制当前运行模式：true=写入阶段，false=恢复验证阶段
-        boolean writePhase = 1 == 3; // ⚠️ 第一次运行设为 true，第二次改为 false
+        boolean writePhase = 1 == 11; // ⚠️ 第一次运行设为 true，第二次改为 false
 
         if (writePhase) {
             runWritePhase();
@@ -33,13 +33,13 @@ public class MiniDBWALTest {
         long before = System.currentTimeMillis();
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
-            for (int i = 0; i < 45000; i++) {
+            for (int i = 0; i < 50000; i++) {
                 String key = "you_and_me_forever_key_" + i;
-                String value = "this_is_value_I_JUST_WANT_TO_COST_SPACE_" + i;
+                String value = "这是分红一段测试的代码" + i;
                 db.put(key.getBytes(), value.getBytes());
-                if (i % 100 == 0) {
-                    System.out.println("写入: " + key + " -> " + value);
-                }
+//                if (i % 500 == 0) {
+//                    System.out.println("写入: " + key + " -> " + value);
+//                }
             }
             System.out.println("✅ 写入完成，关闭数据库以触发 WAL flush。");
         } catch (Exception e) {
@@ -58,7 +58,7 @@ public class MiniDBWALTest {
                 .build();
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
-            for (int i = 0; i < 45000; i++) {
+            for (int i = 0; i < 100000; i += 1000) {
                 String key = "you_and_me_forever_key_" + i;
                 byte[] valueBytes = db.get(key.getBytes());
                 if (valueBytes != null) {
@@ -69,6 +69,7 @@ public class MiniDBWALTest {
                 }
             }
             System.out.println("✅ 恢复验证完成。");
+            System.out.println(db.getStats());
         } catch (Exception e) {
             System.err.println("❌ 数据库恢复失败: " + e.getMessage());
             e.printStackTrace();
