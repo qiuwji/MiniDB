@@ -59,12 +59,4 @@ public class CacheHandle implements AutoCloseable {
     public boolean isClosed() {
         return closed;
     }
-
-    @Override
-    protected void finalize() throws Throwable {
-        if (!closed) {
-            close();
-        }
-        super.finalize();
-    }
 }

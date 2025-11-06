@@ -1,5 +1,7 @@
 package com.qiu.version;
 
+import com.qiu.cache.BlockCache;
+
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -28,16 +30,34 @@ public class VersionSet implements AutoCloseable {
 
     private Manifest manifest;
 
+    // === 修改点: 增加 BlockCache 字段 ===
+    private final BlockCache blockCache;
+
     // === 新增：安全文件删除机制 ===
     private final Set<Long> pendingDeletion = ConcurrentHashMap.newKeySet();
 
+    // === 修改点: 链式调用到主构造函数 ===
     public VersionSet(String dbPath) throws IOException {
-        this(dbPath, 7); // 默认7个层级
+        this(dbPath, 7, null); // 默认7个层级, null cache
     }
 
+    // === 修改点: 链式调用到主构造函数 ===
     public VersionSet(String dbPath, int maxLevels) throws IOException {
+        this(dbPath, maxLevels, null); // 默认 null cache
+    }
+
+    /**
+     * === 修改点: 新增的主构造函数，用于依赖注入 ===
+     * * @param dbPath 数据库路径
+     * @param maxLevels 最大层级
+     * @param blockCache 注入的块缓存 (可以为 null)
+     * @throws IOException
+     */
+    public VersionSet(String dbPath, int maxLevels, BlockCache blockCache) throws IOException {
         this.dbPath = Objects.requireNonNull(dbPath, "Database path cannot be null");
         this.maxLevels = maxLevels;
+        this.blockCache = blockCache; // <-- 存储注入的缓存
+
         this.nextFileNumber = new AtomicLong(1);
         this.manifestFileNumber = new AtomicLong(0);
         this.lastSequence = new AtomicLong(0);
@@ -56,6 +76,7 @@ public class VersionSet implements AutoCloseable {
         // 尝试恢复现有版本
         recover();
     }
+
 
     /**
      * 获取当前版本
@@ -104,8 +125,6 @@ public class VersionSet implements AutoCloseable {
         // 创建新版本
         Version newVersion = new Version(this);
 
-        // === 修复 P5.1: 正确复制文件列表 ===
-        // 1. 获取 'current' 版本的*真实*文件列表 (只读)
         List<List<FileMetaData>> currentFiles = current.getInternalFilesForRead();
         // 2. 获取 'newVersion' 的*真实*文件列表 (用于修改)
         List<List<FileMetaData>> newVersionFiles = newVersion.getInternalFilesForEdit();
@@ -521,6 +540,13 @@ public class VersionSet implements AutoCloseable {
 
         // 切换到新版本
         appendVersion(newVersion);
+    }
+
+    /**
+     * === 修改点: 实现 getBlockCache 方法 ===
+     */
+    public BlockCache getBlockCache() {
+        return this.blockCache;
     }
 
     /**

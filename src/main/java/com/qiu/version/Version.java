@@ -2,6 +2,8 @@ package com.qiu.version;
 
 import com.qiu.sstable.SSTable;
 import com.qiu.util.BytewiseComparator;
+// === 修改点: 导入 BlockCache ===
+import com.qiu.cache.BlockCache;
 
 import java.io.IOException;
 import java.util.*;
@@ -9,7 +11,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 数据库版本，表示某个时间点的数据库状态
- * (修复了线程安全和实现逻辑)
  */
 public class Version {
     private final VersionSet versionSet;
@@ -17,7 +18,6 @@ public class Version {
     private final long versionId;
     private final java.util.Comparator<byte[]> comparator;
 
-    // === 修复 P3: 'refs' 必须是原子的，以实现线程安全的引用计数 ===
     private final AtomicInteger refs;
 
     public Version(VersionSet versionSet) {
@@ -31,9 +31,6 @@ public class Version {
 
         // 初始化所有层级
         for (int i = 0; i < versionSet.getMaxLevels(); i++) {
-            // === 修复 P5: 使用 ArrayList 替代 CopyOnWriteArrayList ===
-            // 1. COWAL 在构建时 (add/remove) 效率极低。
-            // 2. COWAL 的迭代器不支持 remove()，导致 removeFile() 必定失败。
             files.add(new ArrayList<>());
         }
     }
@@ -45,7 +42,6 @@ public class Version {
         Objects.requireNonNull(key, "Key cannot be null");
 
         // 从第0层开始查找（最新的数据）
-        // === 修复 P5.1: getFiles() 现在返回防御性拷贝，可以安全迭代 ===
         List<FileMetaData> level0Files = getFiles(0);
         for (FileMetaData fileMeta : level0Files) {
             if (fileMeta.containsKey(key)) {
@@ -76,10 +72,16 @@ public class Version {
 
     /**
      * 在特定文件中查找键
+     * === 修改点: 注入 BlockCache 和 versionId 到 SSTable ===
      */
     private byte[] lookupFile(FileMetaData fileMeta, byte[] key) throws IOException {
         String fileName = versionSet.getTableFileName(fileMeta.getFileNumber());
-        try (SSTable table = new SSTable(fileName, comparator)) {
+
+        // 1. 从 VersionSet 获取缓存
+        BlockCache cache = versionSet.getBlockCache();
+
+        // 2. 将 cache 和 this.versionId 注入 SSTable
+        try (SSTable table = new SSTable(fileName, comparator, cache, this.versionId)) {
             Optional<byte[]> value = table.get(key);
             return value.orElse(null);
         }

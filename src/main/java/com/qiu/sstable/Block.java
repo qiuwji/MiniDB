@@ -61,6 +61,10 @@ public class Block {
         return null;
     }
 
+    public byte[] getData() {
+        return data;
+    }
+
     /**
      * Block迭代器
      */

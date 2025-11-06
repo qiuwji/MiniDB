@@ -1,6 +1,8 @@
 package com.qiu.sstable;
 
 import com.qiu.util.BytewiseComparator;
+// === 修改点: 导入 BlockCache ===
+import com.qiu.cache.BlockCache;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -22,26 +24,48 @@ public class SSTable implements AutoCloseable {
     private final BloomFilter filter;
     private final Block indexBlock;
     private final Comparator<byte[]> comparator;
+
+    // === 修改点: 新增缓存字段 ===
+    private final BlockCache blockCache;
+    private final long versionId; // 用于缓存键的唯一性
+    // === 结束修改 ===
+
     private boolean closed;
 
+    // === 修改点: 链式调用到主构造函数 ===
     public SSTable(String filePath) throws IOException {
-        this(filePath, new BytewiseComparator());
+        this(filePath, new BytewiseComparator(), null, 0L);
     }
 
+    // === 修改点: 链式调用到主构造函数 ===
     public SSTable(String filePath, Comparator<byte[]> comparator) throws IOException {
+        this(filePath, comparator, null, 0L);
+    }
+
+    /**
+     * === 修改点: 新增的主构造函数，支持依赖注入 ===
+     */
+    public SSTable(String filePath, Comparator<byte[]> comparator, BlockCache cache, long versionId) throws IOException {
         this.filePath = Objects.requireNonNull(filePath, "File path cannot be null");
         this.comparator = Objects.requireNonNull(comparator, "Comparator cannot be null");
+
+        // 存储注入的依赖
+        this.blockCache = cache;
+        this.versionId = versionId;
 
         Path path = Path.of(filePath);
         this.fileChannel = FileChannel.open(path, StandardOpenOption.READ);
         this.footer = readFooter();
         this.filter = readFilter();
+
+        // readIndexBlock() 现在会自动使用带缓存的 readBlock()
         this.indexBlock = readIndexBlock();
         this.closed = false;
     }
 
+
     /**
-     * 查找指定键的值（改进版）
+     * 查找指定键的值
      */
     public Optional<byte[]> get(byte[] key) throws IOException {
         checkNotClosed();
@@ -58,6 +82,7 @@ public class SSTable implements AutoCloseable {
         }
 
         // 读取数据块并在其中查找
+        // === 修改点: readBlock 现在会使用缓存 ===
         Block dataBlock = readBlock(dataHandle);
         byte[] value = dataBlock.get(key);
 
@@ -286,23 +311,50 @@ public class SSTable implements AutoCloseable {
 
     /**
      * 读取索引块
+     * === 修改点: 调用带缓存的 readBlock ===
      */
     private Block readIndexBlock() throws IOException {
         BlockHandle indexHandle = footer.getIndexHandle();
-        byte[] indexData = readBlockData(indexHandle);
-        return new Block(indexData, comparator);
+        // byte[] indexData = readBlockData(indexHandle); // <-- 旧代码
+        // return new Block(indexData, comparator);       // <-- 旧代码
+        return readBlock(indexHandle); // <-- 新代码: 调用缓存版本的 readBlock
     }
 
     /**
      * 读取指定块的数据
+     * === 修改点: 实现 Cache-Aside 逻辑 ===
      */
     Block readBlock(BlockHandle handle) throws IOException {
+        // 1. 如果没有注入缓存，保持原逻辑
+        if (blockCache == null) {
+            byte[] blockData = readBlockData(handle);
+            return new Block(blockData, comparator);
+        }
+
+        long blockOffset = handle.offset();
+
+        // 2. 尝试从缓存读取
+        // (使用 filePath 作为 tableName, blockOffset 和 versionId 作为唯一键)
+        byte[] cachedData = blockCache.get(this.filePath, blockOffset, this.versionId);
+
+        if (cachedData != null) {
+            // 3. 缓存命中 (Cache Hit)
+            return new Block(cachedData, comparator);
+        }
+
+        // 4. 缓存未命中 (Cache Miss)
+        // 从磁盘读取原始数据
         byte[] blockData = readBlockData(handle);
+
+        // 5. 将数据存入缓存
+        // (BlockCache 已修改为接受 byte[])
+        blockCache.put(this.filePath, blockOffset, blockData, this.versionId);
+
         return new Block(blockData, comparator);
     }
 
     /**
-     * 读取块原始数据
+     * 读取块原始数据 (此方法不变，作为缓存未命中时的回退)
      */
     private byte[] readBlockData(BlockHandle handle) throws IOException {
         // 允许大小为0的块（空块）
@@ -546,6 +598,7 @@ public class SSTable implements AutoCloseable {
 
             byte[] handleData = indexIter.value();
             BlockHandle handle = table.decodeBlockHandle(handleData);
+            // === 修改点: table.readBlock() 现在带缓存 ===
             Block block = table.readBlock(handle);
             currentBlockIter = block.iterator();
         }

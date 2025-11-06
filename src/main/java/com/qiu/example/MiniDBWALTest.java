@@ -14,7 +14,7 @@ public class MiniDBWALTest {
 
     public static void main(String[] args) {
         // 控制当前运行模式：true=写入阶段，false=恢复验证阶段
-        boolean writePhase = 1 == 11; // ⚠️ 第一次运行设为 true，第二次改为 false
+        boolean writePhase = 1 == 12; // ⚠️ 第一次运行设为 true，第二次改为 false
 
         if (writePhase) {
             runWritePhase();
@@ -33,7 +33,7 @@ public class MiniDBWALTest {
         long before = System.currentTimeMillis();
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
-            for (int i = 0; i < 50000; i++) {
+            for (int i = 0; i < 100000; i++) {
                 String key = "you_and_me_forever_key_" + i;
                 String value = "这是分红一段测试的代码" + i;
                 db.put(key.getBytes(), value.getBytes());
@@ -58,6 +58,7 @@ public class MiniDBWALTest {
                 .build();
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
+            long before = System.currentTimeMillis();
             for (int i = 0; i < 100000; i += 1000) {
                 String key = "you_and_me_forever_key_" + i;
                 byte[] valueBytes = db.get(key.getBytes());
@@ -68,6 +69,23 @@ public class MiniDBWALTest {
                     System.out.println("❌ 未找到: " + key);
                 }
             }
+            long after = System.currentTimeMillis();
+            System.out.println("时间流逝1：" + (after - before));
+
+//            before = System.currentTimeMillis();
+//            for (int i = 0; i < 50000; i += 1000) {
+//                String key = "you_and_me_forever_key_" + i;
+//                byte[] valueBytes = db.get(key.getBytes());
+//                if (valueBytes != null) {
+//                    String value = new String(valueBytes);
+//                    // System.out.println("读取成功: " + key + " -> " + value);
+//                } else {
+//                    System.out.println("❌ 未找到: " + key);
+//                }
+//            }
+//            after = System.currentTimeMillis();
+//            System.out.println("时间流逝2：" + (after - before));
+
             System.out.println("✅ 恢复验证完成。");
             System.out.println(db.getStats());
         } catch (Exception e) {

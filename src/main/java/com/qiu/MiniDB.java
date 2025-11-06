@@ -48,10 +48,17 @@ public class MiniDB implements DB {
         this.dbPath = Objects.requireNonNull(dbPath, "Database path cannot be null");
         this.options = options != null ? options : Options.defaultOptions();
 
-        // 初始化组件
-        this.versionSet = new VersionSet(dbPath, this.options.getMaxLevels());
+        // === 修改点: 依赖注入顺序 ===
+        // 1. 首先创建 BlockCache
         this.blockCache = new BlockCache(this.options.getCacheSize());
+
+        // 2. 将 BlockCache 注入到 VersionSet
+        // (*** 假设 VersionSet 构造函数已修改为 (String, int, BlockCache) ***)
+        this.versionSet = new VersionSet(dbPath, this.options.getMaxLevels(), this.blockCache);
+
+        // 3. 继续创建其他组件
         this.compactionManager = new CompactionManager(versionSet);
+        // === 结束修改 ===
 
         // 初始化内存表
         this.memTable = new MemTable();
@@ -136,7 +143,6 @@ public class MiniDB implements DB {
             System.err.println("Error reading from SSTable: " + e.getMessage());
             return null;
         } finally {
-            // === 关键修复：确保版本引用计数减少 ===
             if (currentVersion != null) {
                 currentVersion.unref();
             }
@@ -355,8 +361,8 @@ public class MiniDB implements DB {
                         recoveredBatches++;
                         recoveredRecords += batch.size();
 
-                        System.out.printf("Recovered batch with %d operations, original seq: %d%n",
-                                batch.size(), originalSeq);
+//                        System.out.printf("Recovered batch with %d operations, original seq: %d%n",
+//                                batch.size(), originalSeq);
                     }
                 }
             } catch (Exception e) {

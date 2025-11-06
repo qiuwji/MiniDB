@@ -4,6 +4,7 @@ package com.qiu.cache;
  * 缓存接口
  */
 public interface Cache {
+
     /**
      * 将数据插入缓存
      */

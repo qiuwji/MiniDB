@@ -310,7 +310,7 @@ public class MemTable {
         @Override
         public String toString() {
             return String.format("MemTableIterator{valid=%s, key=%s}",
-                    valid, valid ? key().getUserKey() : "null");
+                    valid, valid ? Arrays.toString(key().getUserKey()) : "null");
         }
     }
 

@@ -103,6 +103,17 @@ public class CacheStats {
         return merged;
     }
 
+    /**
+     * 原子合并统计信息到当前对象
+     */
+    public void mergeAtomically(CacheStats other) {
+        hitCount.addAndGet(other.hitCount.get());
+        missCount.addAndGet(other.missCount.get());
+        insertCount.addAndGet(other.insertCount.get());
+        deleteCount.addAndGet(other.deleteCount.get());
+        evictionCount.addAndGet(other.evictionCount.get());
+    }
+
     @Override
     public String toString() {
         return String.format("CacheStats{hits=%d, misses=%d, hitRate=%.3f, inserts=%d, deletes=%d, evictions=%d}",

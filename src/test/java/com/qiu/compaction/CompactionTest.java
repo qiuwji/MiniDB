@@ -167,7 +167,7 @@ public class CompactionTest {
                 new FileMetaData(5L, 1024, "q".getBytes(), "t".getBytes())
         ));
 
-        when(currentVersion.getFiles(1)).thenReturn(Arrays.asList(
+        when(currentVersion.getFiles(1)).thenReturn(List.of(
                 new FileMetaData(6L, 2048, "a".getBytes(), "z".getBytes())
         ));
 
