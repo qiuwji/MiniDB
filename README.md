@@ -1,6 +1,6 @@
-# MiniDB - 基于LSM Tree的键值嵌入数据库实现
+# MiniDB - 基于LSM Tree的键值数据库实现
 
-MiniDB 是一个轻量级嵌入式数据库实现，提供基本的键值存储功能。
+MiniDB 是一个轻量级键值数据库实现，提供基本的键值存储功能。
 该项目旨在展示嵌入式数据库的核心工作原理，包括内存表、持久化存储、日志系统等关键组件，
 主要是个人用于学习用途。
 
@@ -35,10 +35,11 @@ WAL (Write-Ahead Logging) 是保证数据安全的关键组件，所有写入操
 
 ### 2. 内存表(MemTable)
 
-内存表是数据写入的第一站，基于有序数据结构实现，提供高效的插入和查询。
+内存表是数据写入的第一站，采用有序数据结构（如跳表）实现，提供高效的插入、查询和删除操作。
 
-- 当内存表大小达到阈值时，会转换为不可变内存表并最终持久化为 SSTable
-- 提供迭代器接口，用于遍历内存中的键值对
+- 当内存表达到预设大小阈值时，会被转换为Immutable MemTable
+- Immutable MemTable 会被异步刷新到磁盘，生成SSTable
+- 内存表操作在并发环境下通过读写锁保证线程安全
 
 ### 3. SSTable
 
@@ -47,6 +48,8 @@ SSTable (Sorted String Table) 是磁盘上的有序键值对集合，是数据�
 - `SSTable` 类：负责 SSTable 文件的读写
 - `BlockBuilder`：构建 SSTable 中的数据块
 - `Footer`：存储 SSTable 的元数据索引和数据索引
+- 采用块级压缩和缓存机制提升读取性能
+- 每个 SSTable 包含有序的键值对，支持二分查找
 
 ### 4. 版本控制
 
@@ -55,33 +58,66 @@ SSTable (Sorted String Table) 是磁盘上的有序键值对集合，是数据�
 - `Version`：表示数据库的一个版本，包含各层级的 SSTable
 - `VersionEdit`：记录版本之间的变更
 - `Manifest`：持久化存储版本变更历史，用于系统恢复
+- `Compaction`：合并不同层级的 SSTable，减少数据冗余，提升查询效率
+
+### 5. 事务支持
+
+通过 `WriteBatch` 实现批量操作的原子性，确保一组操作要么全部成功，要么全部失败。
+
+- 支持批量 `put` 和 `delete` 操作
+- 操作序列会被序列化后写入日志，保证崩溃可恢复
+- 提供事务边界，确保操作的原子性
+
+## 快速开始
+
+### 环境要求
+
+- JDK 17 及以上版本
+- Maven 3.6+（用于构建项目）
+
+### 构建项目
+
+```bash
+# 克隆仓库
+git clone https://github.com/yourusername/minidb.git
+cd minidb
+
+# 编译项目
+mvn clean package
+```
+
+### 基本使用示例
+
+```java
+// 打开数据库
+Options options = new Options().setCreateIfMissing(true);
+MiniDB db = MiniDB.open(options, "/path/to/db");
+
+try {
+    // 写入数据
+    db.put("name".getBytes(), "Alice".getBytes());
+    db.put("age".getBytes(), "30".getBytes());
+    
+    // 读取数据
+    byte[] value = db.get("name".getBytes());
+    System.out.println("Name: " + new String(value));
+    
+    // 批量操作
+    try (WriteBatch batch = db.createWriteBatch()) {
+        batch.put("email".getBytes(), "alice@example.com".getBytes());
+        batch.delete("age".getBytes());
+        db.write(batch);
+    }
+    
+    // 删除数据
+    db.delete("name".getBytes());
+} finally {
+    // 关闭数据库
+    db.close();
+}
+```
 
 ## 注意事项
 
 - 本项目主要用于学习和演示目的，不建议直接用于生产环境
 - 性能优化和错误处理仍有提升空间
-
-## 待办事项
-
-1. **功能验证与 Bug 修复**
-    - 设计全面的测试用例，覆盖各种边界情况
-    - 验证LSM树结构的正确性，包括Compaction机制
-    - 排查并修复现有实现中的潜在bug
-    - 增强异常处理机制，提高系统稳定性
-
-2. **并发安全实现**
-    - 为MemTable添加读写锁(ReadWriteLock)支持
-    - 实现SSTable操作的同步机制
-    - 为版本控制模块添加并发访问控制
-    - 设计细粒度锁策略，平衡安全性与性能
-
-3. **远程访问支持**
-    - 引入NIO网络模型，实现高效网络通信
-    - 设计客户端-服务器通信协议
-    - 实现基本的网络API接口，支持远程操作
-    - 添加网络传输中的数据序列化/反序列化机制
-    - 实现权限控制与安全认证
-
-4. **其他优化**
-    - 优化Compaction策略，提升系统性能
-    - 完善事务隔离级别支持
