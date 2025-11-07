@@ -1,4 +1,4 @@
-import com.qiu.MiniDB;
+import com.qiu.core.MiniDB;
 import com.qiu.core.Options;
 import com.qiu.core.Status;
 import org.junit.jupiter.api.AfterAll;

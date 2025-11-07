@@ -37,7 +37,6 @@ public class BlockCache {
 
     /**
      * 插入块到缓存，新增version字段，避免缓存与DB的不一致
-     * === 修改点: 接受 byte[] blockData 而不是 Block block ===
      */
     public void put(String tableName, long blockOffset, byte[] blockData, long versionId) {
         String key = buildKey(tableName, blockOffset, versionId);

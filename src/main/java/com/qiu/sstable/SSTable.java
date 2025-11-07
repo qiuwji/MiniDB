@@ -82,7 +82,6 @@ public class SSTable implements AutoCloseable {
         }
 
         // 读取数据块并在其中查找
-        // === 修改点: readBlock 现在会使用缓存 ===
         Block dataBlock = readBlock(dataHandle);
         byte[] value = dataBlock.get(key);
 
@@ -311,18 +310,14 @@ public class SSTable implements AutoCloseable {
 
     /**
      * 读取索引块
-     * === 修改点: 调用带缓存的 readBlock ===
      */
     private Block readIndexBlock() throws IOException {
         BlockHandle indexHandle = footer.getIndexHandle();
-        // byte[] indexData = readBlockData(indexHandle); // <-- 旧代码
-        // return new Block(indexData, comparator);       // <-- 旧代码
         return readBlock(indexHandle); // <-- 新代码: 调用缓存版本的 readBlock
     }
 
     /**
      * 读取指定块的数据
-     * === 修改点: 实现 Cache-Aside 逻辑 ===
      */
     Block readBlock(BlockHandle handle) throws IOException {
         // 1. 如果没有注入缓存，保持原逻辑
@@ -339,6 +334,7 @@ public class SSTable implements AutoCloseable {
 
         if (cachedData != null) {
             // 3. 缓存命中 (Cache Hit)
+            // System.out.println("缓存命中");
             return new Block(cachedData, comparator);
         }
 

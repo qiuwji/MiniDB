@@ -65,11 +65,7 @@ public class SkipList<K, V> {
 
             current = current.forward[0];
 
-            // 如果键已存在，更新值（当前实现选择插入新节点，保留历史）
-            if (current != null && comparator.compare(current.key, key) == 0) {
-                // 不在此处替换旧节点（MemTable使用InternalKey区别不同版本）
-            }
-
+            // 如果键已存在，当前实现不替换（MemTable 使用 InternalKey 管理不同版本）
             // 生成新节点的层级
             int newLevel = randomLevel();
             if (newLevel > level) {
@@ -245,6 +241,35 @@ public class SkipList<K, V> {
         return new SkipListIterator();
     }
 
+    /**
+     * 查找第一个 >= key 的元素（用于 MemTable 最新版本查找）
+     */
+    public Entry<K, V> findGreaterOrEqual(K key) {
+        Objects.requireNonNull(key, "Key cannot be null");
+        readWriteLock.readLock().lock();
+        try {
+            Node<K, V> current = head;
+
+            // 从最高层向下查找第一个 >= key 的节点
+            for (int i = level; i >= 0; i--) {
+                while (current.forward[i] != null &&
+                        comparator.compare(current.forward[i].key, key) < 0) {
+                    current = current.forward[i];
+                }
+            }
+
+            current = current.forward[0];
+            if (current != null) {
+                K keyCopy = defensiveCopyKey(current.key);
+                V valueCopy = defensiveCopy(current.value);
+                return new Entry<>(keyCopy, valueCopy);
+            }
+            return null;
+        } finally {
+            readWriteLock.readLock().unlock();
+        }
+    }
+
     private int randomLevel() {
         int level = 0;
         while (random.nextDouble() < P && level < MAX_LEVEL) {
@@ -262,6 +287,17 @@ public class SkipList<K, V> {
             return (V) copy;
         }
         return value;
+    }
+
+    @SuppressWarnings("unchecked")
+    private K defensiveCopyKey(K key) {
+        if (key instanceof byte[]) {
+            byte[] original = (byte[]) key;
+            byte[] copy = new byte[original.length];
+            System.arraycopy(original, 0, copy, 0, original.length);
+            return (K) copy;
+        }
+        return key;
     }
 
     /**
@@ -319,17 +355,6 @@ public class SkipList<K, V> {
                 readWriteLock.readLock().unlock();
                 lockAcquired = false;
             }
-        }
-
-        @SuppressWarnings("unchecked")
-        private K defensiveCopyKey(K key) {
-            if (key instanceof byte[]) {
-                byte[] original = (byte[]) key;
-                byte[] copy = new byte[original.length];
-                System.arraycopy(original, 0, copy, 0, original.length);
-                return (K) copy;
-            }
-            return key;
         }
 
         private void checkForComodification() {

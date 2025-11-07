@@ -1,6 +1,6 @@
 package com.qiu.example;
 
-import com.qiu.MiniDB;
+import com.qiu.core.MiniDB;
 import com.qiu.core.Options;
 
 /**
@@ -59,7 +59,7 @@ public class MiniDBWALTest {
 
         try (MiniDB db = MiniDB.open(DB_PATH, options)) {
             long before = System.currentTimeMillis();
-            for (int i = 0; i < 100000; i += 1000) {
+            for (int i = 0; i < 2000; i += 1) {
                 String key = "you_and_me_forever_key_" + i;
                 byte[] valueBytes = db.get(key.getBytes());
                 if (valueBytes != null) {
@@ -70,22 +70,7 @@ public class MiniDBWALTest {
                 }
             }
             long after = System.currentTimeMillis();
-            System.out.println("时间流逝1：" + (after - before));
-
-//            before = System.currentTimeMillis();
-//            for (int i = 0; i < 50000; i += 1000) {
-//                String key = "you_and_me_forever_key_" + i;
-//                byte[] valueBytes = db.get(key.getBytes());
-//                if (valueBytes != null) {
-//                    String value = new String(valueBytes);
-//                    // System.out.println("读取成功: " + key + " -> " + value);
-//                } else {
-//                    System.out.println("❌ 未找到: " + key);
-//                }
-//            }
-//            after = System.currentTimeMillis();
-//            System.out.println("时间流逝2：" + (after - before));
-
+            System.out.println("时间流逝：" + (after - before));
             System.out.println("✅ 恢复验证完成。");
             System.out.println(db.getStats());
         } catch (Exception e) {

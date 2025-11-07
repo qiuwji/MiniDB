@@ -1,8 +1,7 @@
-package com.qiu;
+package com.qiu.core;
 
 import com.qiu.cache.BlockCache;
 import com.qiu.compaction.CompactionManager;
-import com.qiu.core.*;
 import com.qiu.iterator.DBIterator;
 import com.qiu.memory.MemTable;
 import com.qiu.sstable.TableBuilder;

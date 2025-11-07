@@ -28,7 +28,7 @@ public class CacheEntry {
     }
 
     public byte[] getData() {
-        return data.clone(); // 防御性拷贝
+        return data;
     }
 
     public long getSize() {

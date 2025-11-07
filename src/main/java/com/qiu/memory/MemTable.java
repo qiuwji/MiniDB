@@ -59,73 +59,45 @@ public class MemTable {
     }
 
     /**
-     * 查找键对应的值（使用 InternalKey）
+     * 查找键对应的值（使用 InternalKey，精确匹配）
      */
     public byte[] get(InternalKey key) {
         Objects.requireNonNull(key, "Key cannot be null");
 
-        // 由于跳表中相同userKey但不同sequence的键是排序的，我们只需要找到第一个匹配的
-        // 因为序列号是降序排列，第一个匹配的就是最新的版本
-        Iterator<SkipList.Entry<InternalKey, byte[]>> iterator = table.iterator();
-        while (iterator.hasNext()) {
-            SkipList.Entry<InternalKey, byte[]> entry = iterator.next();
-            InternalKey currentKey = entry.getKey();
-
-            // 比较用户键（忽略序列号）
-            if (compareUserKeys(currentKey.getUserKey(), key.getUserKey()) == 0) {
-                byte[] value = entry.getValue();
-
-                // 如果是删除标记，返回null
-                if (currentKey.isDeletion()) {
-                    return null;
-                }
-
-                // 返回值的防御性拷贝
-                return value != null ? value.clone() : null;
-            }
-
-            // 由于键是排序的，如果当前用户键大于目标键，可以提前结束
-            if (compareUserKeys(currentKey.getUserKey(), key.getUserKey()) > 0) {
-                break;
-            }
-        }
-
-        return null;
+        // 直接使用 SkipList 的精确查找（仅在 caller 使用完整 InternalKey 时适用）
+        return table.get(key);
     }
 
     /**
-     * 查找用户键对应的值（用于数据库查询）
+     * 查找用户键对应的值（用于数据库查询），返回该 userKey 的最新版本（跳过 tombstone）
      */
     public byte[] get(byte[] userKey) {
         Objects.requireNonNull(userKey, "User key cannot be null");
 
-        // 创建一个虚拟的InternalKey用于查找（使用最大序列号确保找到最新版本）
+        // 构造查找用的 InternalKey，使用最大序列号确保找到最新版本
         InternalKey lookupKey = new InternalKey(userKey, Long.MAX_VALUE, InternalKey.ValueType.VALUE);
 
-        Iterator<SkipList.Entry<InternalKey, byte[]>> iterator = table.iterator();
-        while (iterator.hasNext()) {
-            SkipList.Entry<InternalKey, byte[]> entry = iterator.next();
-            InternalKey currentKey = entry.getKey();
-
-            // 比较用户键
-            int cmp = compareUserKeys(currentKey.getUserKey(), userKey);
-            if (cmp == 0) {
-                // 找到匹配的用户键
-                byte[] value = entry.getValue();
-
-                if (currentKey.isDeletion()) {
-                    return null; // 墓碑标记
-                }
-
-                return value != null ? value.clone() : null; // 防御性拷贝
-            }
-
-            if (cmp > 0) {
-                break; // 已超过可能的范围
-            }
+        // 使用 SkipList 的 findGreaterOrEqual 方法高效查找
+        SkipList.Entry<InternalKey, byte[]> entry = table.findGreaterOrEqual(lookupKey);
+        if (entry == null) {
+            return null; // 没有任何 >= 该 key 的条目
         }
 
-        return null; // 未找到
+        InternalKey foundKey = entry.getKey();
+
+        // 如果 userKey 不相等，说明查找结果已经超过目标范围
+        if (compareUserKeys(foundKey.getUserKey(), userKey) != 0) {
+            return null;
+        }
+
+        // 检查是否是删除标记
+        if (foundKey.isDeletion()) {
+            return null;
+        }
+
+        // 返回防御性拷贝
+        byte[] value = entry.getValue();
+        return value != null ? value.clone() : null;
     }
 
     /**
@@ -300,17 +272,39 @@ public class MemTable {
         public List<SkipList.Entry<InternalKey, byte[]>> getAllEntries() {
             List<SkipList.Entry<InternalKey, byte[]>> entries = new ArrayList<>();
             MemTableIterator iter = memTable.iterator();
-            while (iter.isValid()) {
-                entries.add(new SkipList.Entry<>(iter.key(), iter.value()));
-                iter.next();
+            try {
+                while (iter.isValid()) {
+                    entries.add(new SkipList.Entry<>(iter.key(), iter.value()));
+                    iter.next();
+                }
+            } finally {
+                iter.close();
             }
             return entries;
+        }
+
+        /**
+         * 关闭迭代器，释放底层读锁（如果存在）
+         */
+        public void close() {
+            if (currentIterator instanceof SkipList.SkipListIterator) {
+                ((SkipList.SkipListIterator) currentIterator).close();
+            }
         }
 
         @Override
         public String toString() {
             return String.format("MemTableIterator{valid=%s, key=%s}",
                     valid, valid ? Arrays.toString(key().getUserKey()) : "null");
+        }
+
+        @Override
+        protected void finalize() throws Throwable {
+            try {
+                close();
+            } finally {
+                super.finalize();
+            }
         }
     }
 
@@ -325,15 +319,19 @@ public class MemTable {
 
         MemTableIterator iter = iterator();
         boolean first = true;
-        while (iter.isValid()) {
-            if (!first) {
-                sb.append(", ");
+        try {
+            while (iter.isValid()) {
+                if (!first) {
+                    sb.append(", ");
+                }
+                sb.append(new String(iter.key().getUserKey()))
+                        .append("=")
+                        .append(new String(iter.value()));
+                iter.next();
+                first = false;
             }
-            sb.append(new String(iter.key().getUserKey()))
-                    .append("=")
-                    .append(new String(iter.value()));
-            iter.next();
-            first = false;
+        } finally {
+            iter.close();
         }
         sb.append("]}");
         return sb.toString();
